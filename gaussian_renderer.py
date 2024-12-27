@@ -149,7 +149,10 @@ def generate_neural_gaussians(viewpoint_camera, pc : GaussianModel, visible_mask
     opacity = neural_opacity[mask]  # [N_opacity_pos_gaussian, 1]
 
     # get offset's color
-    color = pc.get_color_mlp(cat_local_view)  # [N_visible_anchor, K*3]
+    ngp_feat = pc.calc_interp_feat_2(anchor)  # [N_visible_anchor, 32]
+    cat_ngp_local_view = torch.cat([ngp_feat, ob_view, ob_dist], dim=1)
+    color = pc.get_color_ngp_mlp(cat_ngp_local_view)
+    # color = pc.get_color_mlp(cat_local_view)  # [N_visible_anchor, K*3]
     color = color.reshape([anchor.shape[0] * pc.n_offsets, 3])  # [N_visible_anchor*K, 3]
 
     # get offset's cov

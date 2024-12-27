@@ -131,10 +131,10 @@ def training(args_param, dataset, opt, pipe, testing_iterations, saving_iteratio
 
             # Log and save
             torch.cuda.synchronize(); t_start_log = time.time()
-            if iteration == testing_iterations[-1]:
-                apply_coding(gaussians, logger, args_param.model_path)
             if iteration in testing_iterations:
                 apply_testing(scene, (pipe, background), logger)
+            if iteration == testing_iterations[-1]:
+                apply_coding(gaussians, logger, args_param.model_path)
             if (iteration in saving_iterations):
                 logger.info("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)

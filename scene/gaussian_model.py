@@ -219,9 +219,23 @@ class GaussianModel(nn.Module):
                 add_noise=add_noise,
                 Q=Q,
             ).cuda()
+            
+        self.appearance_ngp = mix_3D2D_encoding(
+                n_features=n_features_per_level,
+                resolutions_list=resolutions_list,
+                log2_hashmap_size=log2_hashmap_size,
+                resolutions_list_2D=resolutions_list_2D,
+                log2_hashmap_size_2D=log2_hashmap_size_2D,
+                ste_binary=ste_binary,
+                ste_multistep=ste_multistep,
+                add_noise=add_noise,
+                Q=Q,
+            ).cuda()
 
         encoding_params_num = 0
         for n, p in self.encoding_xyz.named_parameters():
+            encoding_params_num += p.numel()
+        for n, p in self.appearance_ngp.named_parameters():
             encoding_params_num += p.numel()
         encoding_MB = encoding_params_num / 8 / 1024 / 1024
         if not ste_binary: encoding_MB *= 32
@@ -262,6 +276,13 @@ class GaussianModel(nn.Module):
             nn.Linear(self.encoding_xyz.output_dim, feat_dim*2),
             nn.ReLU(True),
             nn.Linear(feat_dim*2, (feat_dim+6+3*self.n_offsets)*2+1+1+1),
+        ).cuda()
+        
+        self.mlp_color_ngp = nn.Sequential(
+            nn.Linear(self.appearance_ngp.output_dim + 3 + 1, feat_dim * 2),
+            nn.ReLU(True),
+            nn.Linear(feat_dim*2, 3*self.n_offsets),
+            nn.Sigmoid()
         ).cuda()
         
         self.mlp_mask = nn.Sequential(
@@ -305,6 +326,8 @@ class GaussianModel(nn.Module):
         self.mlp_cov.eval()
         self.mlp_color.eval()
         self.encoding_xyz.eval()
+        self.mlp_color_ngp.eval()
+        self.appearance_ngp.eval()
         self.mlp_grid.eval()
         self.mlp_mask.eval()
         self.mlp_deform.eval()
@@ -317,6 +340,8 @@ class GaussianModel(nn.Module):
         self.mlp_cov.train()
         self.mlp_color.train()
         self.encoding_xyz.train()
+        self.mlp_color_ngp.train()
+        self.appearance_ngp.train()
         self.mlp_grid.train()
         self.mlp_mask.train()
         self.mlp_deform.train()
@@ -363,6 +388,10 @@ class GaussianModel(nn.Module):
     @property
     def get_color_mlp(self):
         return self.mlp_color
+    
+    @property
+    def get_color_ngp_mlp(self):
+        return self.mlp_color_ngp
 
     @property
     def get_grid_mlp(self):
@@ -410,6 +439,14 @@ class GaussianModel(nn.Module):
         assert torch.abs(self.x_bound_min - torch.zeros(size=[1, 3], device='cuda')).mean() > 0
         x = (x - self.x_bound_min) / (self.x_bound_max - self.x_bound_min)  # to [0, 1]
         features = self.encoding_xyz(x)  # [N, 4*12]
+        return features
+    
+    def calc_interp_feat_2(self, x):
+        # x: [N, 3]
+        assert len(x.shape) == 2 and x.shape[1] == 3
+        assert torch.abs(self.x_bound_min - torch.zeros(size=[1, 3], device='cuda')).mean() > 0
+        x = (x - self.x_bound_min) / (self.x_bound_max - self.x_bound_min)  # to [0, 1]
+        features = self.appearance_ngp(x)  # [N, 4*12]
         return features
 
     @property
@@ -498,6 +535,8 @@ class GaussianModel(nn.Module):
                 {'params': self.mlp_color.parameters(), 'lr': training_args.mlp_color_lr_init, "name": "mlp_color"},
 
                 {'params': self.encoding_xyz.parameters(), 'lr': training_args.encoding_xyz_lr_init, "name": "encoding_xyz"},
+                {'params': self.appearance_ngp.parameters(), 'lr': training_args.encoding_xyz_lr_init, "name": "appearance_ngp"},
+                {'params': self.mlp_color_ngp.parameters(), 'lr': training_args.mlp_color_lr_init, "name": "mlp_color_ngp"},
                 {'params': self.mlp_grid.parameters(), 'lr': training_args.mlp_grid_lr_init, "name": "mlp_grid"},
                 {'params': self.mlp_mask.parameters(), 'lr': training_args.mlp_grid_lr_init, "name": "mlp_mask"},
 
@@ -518,7 +557,9 @@ class GaussianModel(nn.Module):
                 {'params': self.mlp_color.parameters(), 'lr': training_args.mlp_color_lr_init, "name": "mlp_color"},
 
                 {'params': self.encoding_xyz.parameters(), 'lr': training_args.encoding_xyz_lr_init, "name": "encoding_xyz"},
+                {'params': self.appearance_ngp.parameters(), 'lr': training_args.encoding_xyz_lr_init, "name": "appearance_ngp"},
                 {'params': self.mlp_grid.parameters(), 'lr': training_args.mlp_grid_lr_init, "name": "mlp_grid"},
+                {'params': self.mlp_color_ngp.parameters(), 'lr': training_args.mlp_color_lr_init, "name": "mlp_color_ngp"},
 
                 {'params': self.mlp_deform.parameters(), 'lr': training_args.mlp_deform_lr_init, "name": "mlp_deform"},
             ]
@@ -551,6 +592,10 @@ class GaussianModel(nn.Module):
                                                     lr_final=training_args.mlp_color_lr_final,
                                                     lr_delay_mult=training_args.mlp_color_lr_delay_mult,
                                                     max_steps=training_args.mlp_color_lr_max_steps)
+        self.mlp_color_ngp_scheduler_args = get_expon_lr_func(lr_init=training_args.mlp_color_lr_init,
+                                                    lr_final=training_args.mlp_color_lr_final,
+                                                    lr_delay_mult=training_args.mlp_color_lr_delay_mult,
+                                                    max_steps=training_args.mlp_color_lr_max_steps)
         if self.use_feat_bank:
             self.mlp_featurebank_scheduler_args = get_expon_lr_func(lr_init=training_args.mlp_featurebank_lr_init,
                                                         lr_final=training_args.mlp_featurebank_lr_final,
@@ -563,6 +608,12 @@ class GaussianModel(nn.Module):
                                                     max_steps=training_args.encoding_xyz_lr_max_steps,
                                                              step_sub=0 if self.ste_binary else 10000,
                                                              )
+        self.appearance_ngp_scheduler_args = get_expon_lr_func(lr_init=training_args.encoding_xyz_lr_init,
+                                                    lr_final=training_args.encoding_xyz_lr_final,
+                                                    lr_delay_mult=training_args.encoding_xyz_lr_delay_mult,
+                                                    max_steps=training_args.encoding_xyz_lr_max_steps,
+                                                            step_sub=0 if self.ste_binary else 10000,
+                                                            )
         self.mlp_grid_scheduler_args = get_expon_lr_func(lr_init=training_args.mlp_grid_lr_init,
                                                     lr_final=training_args.mlp_grid_lr_final,
                                                     lr_delay_mult=training_args.mlp_grid_lr_delay_mult,
@@ -606,8 +657,13 @@ class GaussianModel(nn.Module):
             if param_group["name"] == "mlp_color":
                 lr = self.mlp_color_scheduler_args(iteration)
                 param_group['lr'] = lr
+            if param_group["name"] == "mlp_color_ngp":
+                lr = self.mlp_color_ngp_scheduler_args(iteration)
+                param_group['lr'] = lr
             if param_group["name"] == "encoding_xyz":
                 lr = self.encoding_xyz_scheduler_args(iteration)
+            if param_group["name"] == "appearance_ngp":
+                lr = self.appearance_ngp_scheduler_args(iteration)
                 param_group['lr'] = lr
             if param_group["name"] == "mlp_grid":
                 lr = self.mlp_grid_scheduler_args(iteration)
