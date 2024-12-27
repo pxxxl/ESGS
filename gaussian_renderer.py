@@ -68,7 +68,7 @@ def generate_neural_gaussians(viewpoint_camera, pc : GaussianModel, visible_mask
                 torch.split(feat_context, split_size_or_sections=[pc.feat_dim, pc.feat_dim, 6, 6, 3*pc.n_offsets, 3*pc.n_offsets, 1, 1, 1], dim=-1)
 
             Q_feat = Q_feat * (1 + torch.tanh(Q_feat_adj))
-            Q_scaling = Q_scaling * (1 + torch.tanh(Q_scaling_adj))
+            Q_scaling = Q_scaling * torch.ones_like(Q_scaling_adj)
             Q_offsets = Q_offsets * (1 + torch.tanh(Q_offsets_adj))
             feat = feat + torch.empty_like(feat).uniform_(-0.5, 0.5) * Q_feat
             grid_scaling = grid_scaling + torch.empty_like(grid_scaling).uniform_(-0.5, 0.5) * Q_scaling
@@ -82,7 +82,9 @@ def generate_neural_gaussians(viewpoint_camera, pc : GaussianModel, visible_mask
             mean = mean[choose_idx]
             scale = scale[choose_idx]
             mean_scaling = mean_scaling[choose_idx]
+            mean_scaling = torch.zeros_like(mean_scaling, device=mean_scaling.device)
             scale_scaling = scale_scaling[choose_idx]
+            scale_scaling = torch.ones_like(scale_scaling, device=scale_scaling.device)
             mean_offsets = mean_offsets[choose_idx]
             scale_offsets = scale_offsets[choose_idx]
             Q_feat = Q_feat[choose_idx]
@@ -110,7 +112,7 @@ def generate_neural_gaussians(viewpoint_camera, pc : GaussianModel, visible_mask
             torch.split(pc.get_grid_mlp(feat_context), split_size_or_sections=[pc.feat_dim, pc.feat_dim, 6, 6, 3*pc.n_offsets, 3*pc.n_offsets, 1, 1, 1], dim=-1)
 
         Q_feat = Q_feat * (1 + torch.tanh(Q_feat_adj))
-        Q_scaling = Q_scaling * (1 + torch.tanh(Q_scaling_adj))
+        Q_scaling = Q_scaling * torch.ones_like(Q_scaling_adj)
         Q_offsets = Q_offsets * (1 + torch.tanh(Q_offsets_adj))  # [N_visible_anchor, 1]
         feat = (STE_multistep.apply(feat, Q_feat, pc._anchor_feat.mean())).detach()
         grid_scaling = (STE_multistep.apply(grid_scaling, Q_scaling, pc.get_scaling.mean())).detach()

@@ -1042,13 +1042,16 @@ class GaussianModel(nn.Module):
         mean, scale, mean_scaling, scale_scaling, mean_offsets, scale_offsets, Q_feat_adj, Q_scaling_adj, Q_offsets_adj = \
             torch.split(self.get_grid_mlp(feat_context), split_size_or_sections=[self.feat_dim, self.feat_dim, 6, 6, 3*self.n_offsets, 3*self.n_offsets, 1, 1, 1], dim=-1)  # [N_visible_anchor, 32], [N_visible_anchor, 32]
         Q_feat = Q_feat * (1 + torch.tanh(Q_feat_adj))
-        Q_scaling = Q_scaling * (1 + torch.tanh(Q_scaling_adj))
+        Q_scaling = Q_scaling * torch.ones_like(Q_scaling_adj, device=Q_scaling_adj.device)
         Q_offsets = Q_offsets * (1 + torch.tanh(Q_offsets_adj))
         _feat = (STE_multistep.apply(_feat, Q_feat)).detach()
         grid_scaling = (STE_multistep.apply(_scaling, Q_scaling)).detach()
         offsets = (STE_multistep.apply(_grid_offsets, Q_offsets.unsqueeze(1))).detach()
         offsets = offsets.view(-1, 3*self.n_offsets)
         mask_tmp = _mask.repeat(1, 1, 3).view(-1, 3*self.n_offsets)
+        
+        scale_scaling = torch.ones_like(scale_scaling, device=scale_scaling.device)
+        mean_scaling = torch.zeros_like(mean_scaling, device=mean_scaling.device)
 
         bit_feat = entropy_skipping(_feat, mean, scale, Q_feat, STE_mask=STE_mask)
         bit_scaling = self.entropy_gaussian.forward(grid_scaling, mean_scaling, scale_scaling, Q_scaling)
