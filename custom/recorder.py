@@ -1,7 +1,20 @@
 import os
+from torch.utils.tensorboard import SummaryWriter
 
 # 全局变量，用于保存日志文件路径
 _log_file_path = None
+tb_writer = None
+train = True
+
+
+def init_tb_writer(folder: str = "."):
+    global tb_writer
+    tb_writer = SummaryWriter(folder)
+    return
+
+def tb():
+    global tb_writer
+    return tb_writer
 
 def init_recorder(filename: str, folder: str = "."):
     """
@@ -88,3 +101,22 @@ class RecordEntry:
             tag_list.append(element['tags'][0])
             data_list.append(element['data'])
         return tag_list, data_list
+    
+    
+def get_logger(path):
+    import logging
+
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+    fileinfo = logging.FileHandler(os.path.join(path, "outputs.log"))
+    fileinfo.setLevel(logging.INFO)
+    controlshow = logging.StreamHandler()
+    controlshow.setLevel(logging.INFO)
+    formatter = logging.Formatter("%(asctime)s - %(levelname)s: %(message)s")
+    fileinfo.setFormatter(formatter)
+    controlshow.setFormatter(formatter)
+
+    logger.addHandler(fileinfo)
+    logger.addHandler(controlshow)
+
+    return logger

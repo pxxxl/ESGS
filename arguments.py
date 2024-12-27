@@ -149,6 +149,79 @@ class OptimizationParams(ParamGroup):
         self.densify_grad_threshold = 0.0002
 
         super().__init__(parser, "Optimization Parameters")
+        
+class FinetuneOptimizationParams(ParamGroup):
+    def __init__(self, parser):
+        self.iterations = 10_000
+        self.position_lr_init = 0.0
+        self.position_lr_final = 0.0
+        self.position_lr_delay_mult = 0.01
+        self.position_lr_max_steps = 10_000
+        
+        self.offset_lr_init = 0.001
+        self.offset_lr_final = 0.0001
+        self.offset_lr_delay_mult = 0.01
+        self.offset_lr_max_steps = 10_000
+        
+        self.mask_lr_init = 0.001
+        self.mask_lr_final = 0.0001
+        self.mask_lr_delay_mult = 0.01
+        self.mask_lr_max_steps = 10_000
+
+        self.feature_lr = 0.0075
+        self.opacity_lr = 0.02
+        self.scaling_lr = 0.007
+        self.rotation_lr = 0.002
+        
+        self.mlp_opacity_lr_init = 0.0002
+        self.mlp_opacity_lr_final = 0.00002  
+        self.mlp_opacity_lr_delay_mult = 0.01
+        self.mlp_opacity_lr_max_steps = 10_000
+
+        self.mlp_cov_lr_init = 0.004
+        self.mlp_cov_lr_final = 0.004
+        self.mlp_cov_lr_delay_mult = 0.01
+        self.mlp_cov_lr_max_steps = 10_000
+        
+        self.mlp_color_lr_init = 0.0008
+        self.mlp_color_lr_final = 0.00005
+        self.mlp_color_lr_delay_mult = 0.01
+        self.mlp_color_lr_max_steps = 10_000
+        
+        self.mlp_featurebank_lr_init = 0.001
+        self.mlp_featurebank_lr_final = 0.00001
+        self.mlp_featurebank_lr_delay_mult = 0.01
+        self.mlp_featurebank_lr_max_steps = 10_000
+
+        self.encoding_xyz_lr_init = 0.0005
+        self.encoding_xyz_lr_final = 0.00001
+        self.encoding_xyz_lr_delay_mult = 0.33
+        self.encoding_xyz_lr_max_steps = 10_000
+
+        self.mlp_grid_lr_init = 0.0005
+        self.mlp_grid_lr_final = 0.00001
+        self.mlp_grid_lr_delay_mult = 0.01
+        self.mlp_grid_lr_max_steps = 10_000
+
+        self.mlp_deform_lr_init = 0.0005
+        self.mlp_deform_lr_final = 0.0005
+        self.mlp_deform_lr_delay_mult = 0.01
+        self.mlp_deform_lr_max_steps = 10_000
+
+        self.percent_dense = 0.01
+        self.lambda_dssim = 0.2
+        
+        # for anchor densification
+        self.start_stat = 10001
+        self.update_from = 10001
+        self.update_interval = 100
+        self.update_until = 10001
+        
+        self.min_opacity = 0.005  # 0.2
+        self.success_threshold = 0.8
+        self.densify_grad_threshold = 0.0002
+
+        super().__init__(parser, "Optimization Parameters")
 
 def get_combined_args(parser : ArgumentParser):
     cmdlne_string = sys.argv[1:]

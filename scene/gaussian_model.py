@@ -10,6 +10,7 @@
 #
 
 import os
+import struct
 import time
 from functools import reduce
 
@@ -322,36 +323,6 @@ class GaussianModel(nn.Module):
 
         if self.use_feat_bank:
             self.mlp_feature_bank.train()
-
-    def capture(self):
-        return (
-            self._anchor,
-            self._offset,
-            self._mask,
-            self._scaling,
-            self._rotation,
-            self._opacity,
-            self.max_radii2D,
-            self.denom,
-            self.optimizer.state_dict(),
-            self.spatial_lr_scale,
-        )
-
-    def restore(self, model_args, training_args):
-        (self.active_sh_degree,
-        self._anchor,
-        self._offset,
-        self._mask,
-        self._scaling,
-        self._rotation,
-        self._opacity,
-        self.max_radii2D,
-        denom,
-        opt_dict,
-        self.spatial_lr_scale) = model_args
-        self.training_setup(training_args)
-        self.denom = denom
-        self.optimizer.load_state_dict(opt_dict)
 
     @property
     def get_scaling(self):
@@ -1067,11 +1038,7 @@ class GaussianModel(nn.Module):
         hash_embeddings = self.get_encoding_params()
 
         feat_context = self.calc_interp_feat(_anchor)  # [N_visible_anchor*0.2, 32]
-        if self.enable_es_in_final_estimation:
-            feat_context_B = self.get_mask_mlp(feat_context)
-            STE_mask = STE_binary_with_ratio.apply(feat_context_B, self.es_ratio)
-        else:
-            STE_mask = None
+        STE_mask = None
         mean, scale, mean_scaling, scale_scaling, mean_offsets, scale_offsets, Q_feat_adj, Q_scaling_adj, Q_offsets_adj = \
             torch.split(self.get_grid_mlp(feat_context), split_size_or_sections=[self.feat_dim, self.feat_dim, 6, 6, 3*self.n_offsets, 3*self.n_offsets, 1, 1, 1], dim=-1)  # [N_visible_anchor, 32], [N_visible_anchor, 32]
         Q_feat = Q_feat * (1 + torch.tanh(Q_feat_adj))
@@ -1110,14 +1077,14 @@ class GaussianModel(nn.Module):
                    f"MLPs {round(self.get_mlp_size()[0]/bit2MB_scale, 4)}, " \
                    f"Total {round((bit_anchor + bit_feat + bit_scaling + bit_offsets + bit_hash + bit_masks + self.get_mlp_size()[0])/bit2MB_scale, 4)}"
                    
-        record(['Final Bit Anchor'], round(bit_anchor/bit2MB_scale, 4))
-        record(['Final Bit Feat'], round(bit_feat/bit2MB_scale, 4))
-        record(['Final Bit Scaling'], round(bit_scaling/bit2MB_scale, 4))
-        record(['Final Bit Offsets'], round(bit_offsets/bit2MB_scale, 4))
-        record(['Final Bit Hash'], round(bit_hash/bit2MB_scale, 4))
-        record(['Final Bit Masks'], round(bit_masks/bit2MB_scale, 4))
-        record(['Final Bit MLPs'], round(self.get_mlp_size()[0]/bit2MB_scale, 4))
-        record(['Final Bit Total'], round((bit_anchor + bit_feat + bit_scaling + bit_offsets + bit_hash + bit_masks + self.get_mlp_size()[0])/bit2MB_scale, 4))
+        # record(['Final Bit Anchor'], round(bit_anchor/bit2MB_scale, 4))
+        # record(['Final Bit Feat'], round(bit_feat/bit2MB_scale, 4))
+        # record(['Final Bit Scaling'], round(bit_scaling/bit2MB_scale, 4))
+        # record(['Final Bit Offsets'], round(bit_offsets/bit2MB_scale, 4))
+        # record(['Final Bit Hash'], round(bit_hash/bit2MB_scale, 4))
+        # record(['Final Bit Masks'], round(bit_masks/bit2MB_scale, 4))
+        # record(['Final Bit MLPs'], round(self.get_mlp_size()[0]/bit2MB_scale, 4))
+        # record(['Final Bit Total'], round((bit_anchor + bit_feat + bit_scaling + bit_offsets + bit_hash + bit_masks + self.get_mlp_size()[0])/bit2MB_scale, 4))
 
         return log_info
 
@@ -1143,7 +1110,7 @@ class GaussianModel(nn.Module):
         np.save(os.path.join(pre_path_name, '_quantized_v.npy'), _quantized_v)
 
         N = _anchor.shape[0]
-        MAX_batch_size = 3_000
+        MAX_batch_size = 2_000
         steps = (N // MAX_batch_size) if (N % MAX_batch_size) == 0 else (N // MAX_batch_size + 1)
 
         bit_feat_list = []
@@ -1225,6 +1192,12 @@ class GaussianModel(nn.Module):
             bit_hash = hash_embeddings.numel()*32
 
         bit_masks = encoder(_mask, file_name=masks_b_name)
+        
+        self.save_min_max(pre_path_name)
+        
+        with open(os.path.join(pre_path_name, 'patches.b'), 'wb') as file:
+            data = struct.pack('iii', self._anchor.shape[0], N, MAX_batch_size)
+            file.write(data)
 
         torch.cuda.synchronize(); t2 = time.time()
         print('encoding time:', t2 - t1)
@@ -1240,13 +1213,18 @@ class GaussianModel(nn.Module):
                    f"MLPs {round(self.get_mlp_size()[0]/bit2MB_scale, 4)}, " \
                    f"Total {round((bit_anchor + bit_feat + bit_scaling + bit_offsets + bit_hash + bit_masks + self.get_mlp_size()[0])/bit2MB_scale, 4)}, " \
                    f"EncTime {round(t2 - t1, 4)}"
-        return [self._anchor.shape[0], N, MAX_batch_size], log_info
+        return log_info
 
     @torch.no_grad()
-    def conduct_decoding(self, pre_path_name, patched_infos):
+    def conduct_decoding(self, pre_path_name):
         torch.cuda.synchronize(); t1 = time.time()
         print('Start decoding ...')
-        [N_full, N, MAX_batch_size] = patched_infos
+        self.load_min_max(pre_path_name)
+        
+        with open(os.path.join(pre_path_name, 'patches.b'), 'rb') as file:
+            data = file.read(12)
+            N_full, N, MAX_batch_size = struct.unpack('iii', data)
+        
         steps = (N // MAX_batch_size) if (N % MAX_batch_size) == 0 else (N // MAX_batch_size + 1)
 
         xyz_decoded_list = []
@@ -1389,11 +1367,6 @@ class GaussianModel(nn.Module):
     def set_steps(self, args):
         self.step_begin_quantization = args.step_begin_quantization
         self.step_begin_RD_training = args.step_begin_RD_training
-        self.step_begin_entropy_skipping = args.step_begin_entropy_skipping
-        
-    def set_es_params(self, args):
-        self.enable_es_in_final_estimation = args.enable_es_in_final_estimation
-        self.es_ratio = args.es_ratio
         
     def save_min_max(self, pre_path_name):
         torch.save([self.x_bound_min, self.x_bound_max], os.path.join(pre_path_name, 'min_max.pkl'))

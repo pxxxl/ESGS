@@ -31,18 +31,30 @@ import uuid
 from tqdm import tqdm
 from utils.image_utils import psnr
 from argparse import ArgumentParser, Namespace
-from arguments import ModelParams, PipelineParams, OptimizationParams, get_project_path
+from arguments import ModelParams, PipelineParams, OptimizationParams, get_project_path, FinetuneOptimizationParams
 from utils.encodings import get_binary_vxl_size
 from lpipsPyTorch import lpips
 from custom.encodings import STE_binary_with_ratio
 from custom.model import entropy_skipping
-from custom.recorder import record, init_recorder, get_logger, init_tb_writer, tb_writer, tb
-import pickle
+from custom.recorder import record, init_recorder, get_logger
 from torch.utils.tensorboard import SummaryWriter
+import pickle
 
 bit2MB_scale = 8 * 1024 * 1024
 
-def training(args_param, dataset, opt, pipe, testing_iterations, saving_iterations, debug_from, logger=None, ply_path=None):
+def finetune(model_path, source_path, logger, finetune_model_path, base_model_iteration):
+    parser = ArgumentParser(description="Resume script parameters")
+    lp = ModelParams(parser)
+    op = FinetuneOptimizationParams(parser)
+    pp = PipelineParams(parser)
+    args = load_args(model_path)
+    args.model_path = model_path
+    args.source_path = source_path
+    dataset = lp.extract(args)
+    opt = op.extract(args)
+    pipe = pp.extract(args)
+    args_param = args
+    
     first_iter = 0
     gaussians = GaussianModel(
         dataset.feat_dim,
@@ -56,18 +68,19 @@ def training(args_param, dataset, opt, pipe, testing_iterations, saving_iteratio
         log2_hashmap_size=args_param.log2,
         log2_hashmap_size_2D=args_param.log2_2D,
     )
-    scene = Scene(dataset, gaussians, ply_path=ply_path)
+    scene = Scene(dataset, gaussians, shuffle=False)
     gaussians.update_anchor_bound()
     gaussians.set_steps(args_param)
-
+    gaussians.conduct_decoding(os.path.join(args_param.model_path, 'bitstreams'))
     gaussians.training_setup(opt)
+    
 
     iter_start = torch.cuda.Event(enable_timing = True)
     iter_end = torch.cuda.Event(enable_timing = True)
 
     viewpoint_stack = None
     ema_loss_for_log = 0.0
-    progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
+    progress_bar = tqdm(range(first_iter, opt.iterations), desc="Finetune progress")
     first_iter += 1
     torch.cuda.synchronize(); t_start = time.time()
     log_time_sub = 0
@@ -84,10 +97,6 @@ def training(args_param, dataset, opt, pipe, testing_iterations, saving_iteratio
             viewpoint_stack = scene.getTrainCameras().copy()
         viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
 
-        # Render
-        if (iteration - 1) == debug_from:
-            pipe.debug = True
-
         voxel_visible_mask = prefilter_voxel(viewpoint_cam, gaussians, pipe, background)
         retain_grad = (iteration < opt.update_until and iteration >= 0)
         render_pkg = render(viewpoint_cam, gaussians, pipe, background, visible_mask=voxel_visible_mask, retain_grad=retain_grad, step=iteration)
@@ -100,20 +109,13 @@ def training(args_param, dataset, opt, pipe, testing_iterations, saving_iteratio
         ssim_loss = (1.0 - ssim(image, gt_image))
         scaling_reg = scaling.prod(dim=1).mean()
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * ssim_loss + 0.01*scaling_reg
-        tb().add_scalar("train/loss/fidelity_loss", loss.item(), iteration)
 
         if bit_per_param is not None:
             _, bit_hash_grid, MB_hash_grid, _ = get_binary_vxl_size((gaussians.get_encoding_params()+1)/2)
             denom = gaussians._anchor.shape[0]*(gaussians.feat_dim+6+3*gaussians.n_offsets)
-            bit_loss = args_param.lmbda * (bit_per_param + bit_hash_grid / denom)
-            loss = loss + bit_loss
-            tb().add_scalar("train/loss/bit_loss", bit_loss.item(), iteration)
+            loss = loss + args_param.lmbda * (bit_per_param + bit_hash_grid / denom)
 
-            mask_loss = 5e-4 * torch.mean(torch.sigmoid(gaussians._mask))
-            loss = loss + mask_loss
-            tb().add_scalar("train/loss/mask_loss", mask_loss.item(), iteration)
-            tb().add_scalar("train/loss/loss", bit_per_param, iteration)
-            
+            loss = loss + 5e-4 * torch.mean(torch.sigmoid(gaussians._mask))
 
         loss.backward()
 
@@ -131,53 +133,40 @@ def training(args_param, dataset, opt, pipe, testing_iterations, saving_iteratio
 
             # Log and save
             torch.cuda.synchronize(); t_start_log = time.time()
-            if iteration == testing_iterations[-1]:
-                apply_coding(gaussians, logger, args_param.model_path)
-            if iteration in testing_iterations:
+            if iteration == args_param.testing_iterations[-1]:
+                apply_coding(scene, logger, args_param.model_path)
+            if iteration in args_param.testing_iterations:
                 apply_testing(scene, (pipe, background), logger)
-            if (iteration in saving_iterations):
+            if (iteration in args_param.saving_iterations):
                 logger.info("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
             torch.cuda.synchronize(); t_end_log = time.time()
             t_log = t_end_log - t_start_log
             log_time_sub += t_log
 
-            # densification
-            if iteration < opt.update_until and iteration > opt.start_stat:
-                gaussians.training_statis(viewspace_point_tensor, opacity, visibility_filter, offset_selection_mask, voxel_visible_mask)
-                if iteration not in range(3000, 4000):  # let the model get fit to quantization
-                    # densification
-                    if iteration > opt.update_from and iteration % opt.update_interval == 0:
-                        gaussians.adjust_anchor(check_interval=opt.update_interval, success_threshold=opt.success_threshold, grad_threshold=opt.densify_grad_threshold, min_opacity=opt.min_opacity)
-            elif iteration == opt.update_until:
-                del gaussians.opacity_accum
-                del gaussians.offset_gradient_accum
-                del gaussians.offset_denom
-                torch.cuda.empty_cache()
-
             if iteration < opt.iterations:
                 gaussians.optimizer.step()
                 gaussians.optimizer.zero_grad(set_to_none = True)
-                
-            tb().add_scalar("train/model/anchor_size", gaussians._anchor.shape[0], iteration)
-            
 
     torch.cuda.synchronize(); t_end = time.time()
     logger.info("\n Total Training time: {}".format(t_end-t_start-log_time_sub))
     return
 
 
-def apply_coding(gaussians: GaussianModel, logger=None, pre_path_name=''):
-    log_info_1 = gaussians.estimate_final_bits()
+def load_gaussian_params(scene: Scene, pre_path_name=''):
+    pass
+
+
+def apply_coding(scene : Scene, logger=None, pre_path_name=''):
+    log_info = scene.gaussians.estimate_final_bits()
+    logger.info(log_info)
     bit_stream_path = os.path.join(pre_path_name, 'bitstreams')
     os.makedirs(bit_stream_path, exist_ok=True)
-    log_info_2 = gaussians.conduct_encoding(pre_path_name=bit_stream_path)
-    log_info_3 = gaussians.conduct_decoding(pre_path_name=bit_stream_path)
-    if logger:
-        logger.info(log_info_1)
-        logger.info(log_info_2)
-        logger.info(log_info_3)
-    
+    log_info = scene.gaussians.conduct_encoding(pre_path_name=bit_stream_path)
+    logger.info(log_info)
+    log_info = scene.gaussians.conduct_decoding(pre_path_name=bit_stream_path)
+    logger.info(log_info)
+
 
 def apply_testing(scene : Scene, renderArgs, logger=None):
     scene.gaussians.eval()
@@ -221,12 +210,14 @@ def apply_testing(scene : Scene, renderArgs, logger=None):
     scene.gaussians.train()
 
 
-def resume_gaussians_from_bitstream(model_path):
+def resume_gaussians_from_bitstream(model_path, source_path, logger=None):
     parser = ArgumentParser(description="Resume script parameters")
     lp = ModelParams(parser)
     op = OptimizationParams(parser)
     pp = PipelineParams(parser)
     args = load_args(model_path)
+    args.model_path = model_path
+    args.source_path = source_path
     dataset = lp.extract(args)
     args_param = args
     with torch.no_grad():
@@ -245,61 +236,40 @@ def resume_gaussians_from_bitstream(model_path):
         )
         scene = Scene(dataset, gaussians, load_iteration=-1, shuffle=False)
         gaussians.eval()
-        gaussians.conduct_encoding(os.path.join(args_param.model_path, 'bitstreams'))
+        gaussians.conduct_decoding(os.path.join(args_param.model_path, 'bitstreams'))
+        log_info = gaussians.estimate_final_bits()
+        bg_color = [1, 1, 1] if lp.extract(args).white_background else [0, 0, 0]
+        background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
+        apply_testing(scene, (pp.extract(args), background), logger)
+        print(log_info)
     return scene, gaussians
 
-def save_args(args, model_path):
-    os.makedirs(model_path, exist_ok=True)
-    os.makedirs(os.path.join(model_path, 'bitstreams'), exist_ok=True)
-    with open(os.path.join(model_path, 'bitstreams', "args.pkl"), 'wb') as f:
-        pickle.dump(args, f)
-        
+
 def load_args(model_path):
     with open(os.path.join(model_path, 'bitstreams', "args.pkl"), 'rb') as f:
         args = pickle.load(f)
     return args
 
+
 def main():
     # Set up command line argument parser
-    parser = ArgumentParser(description="Training script parameters")
-    lp = ModelParams(parser)
-    op = OptimizationParams(parser)
-    pp = PipelineParams(parser)
-    parser.add_argument('--ip', type=str, default="127.0.0.1")
-    parser.add_argument('--port', type=int, default=6009)
-    parser.add_argument('--debug_from', type=int, default=-1)
-    parser.add_argument('--detect_anomaly', action='store_true', default=False)
-    parser.add_argument('--warmup', action='store_true', default=False)
-    parser.add_argument("--test_iterations", nargs="+", type=int, default=[30_000])
-    parser.add_argument("--save_iterations", nargs="+", type=int, default=[30_000])
-    parser.add_argument("--quiet", action="store_true")
-    parser.add_argument("--log2", type=int, default = 13)
-    parser.add_argument("--log2_2D", type=int, default = 15)
-    parser.add_argument("--n_features", type=int, default = 4)
-    parser.add_argument("--lmbda", type=float, default = 0.001)
-    
-    parser.add_argument("--step_begin_quantization", type=int, default=3000)
-    parser.add_argument("--step_begin_RD_training", type=int, default=10000)
-    # adjust the following op parameters to control densification
-    # start_stat = 500
-    # update_from = 1500
-    # update_interval = 100
-    # update_until = 15_000 
+    parser = ArgumentParser(description="Finetune script parameters")
+    parser.add_argument("--base_model_path", type=str, required=True, help="Path to save the base model")
+    parser.add_argument("--fine_tune_model_path", type=str, required=True, help="Path to save the fine-tuned model")
+    parser.add_argument("--base_source_path", type=str, required=True, help="Path to the base source")
     args = parser.parse_args(sys.argv[1:])
-    
-    save_args(args, args.model_path)
-
-    model_path = args.model_path
-    os.makedirs(model_path, exist_ok=True)
-
-    logger = get_logger(model_path)
-    init_recorder("record.txt", model_path)
-    init_tb_writer(os.path.join(model_path, 'runs'))
-
-    safe_state(args.quiet)
-    torch.autograd.set_detect_anomaly(args.detect_anomaly)
-
-    training(args, lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.debug_from, logger)
+    os.makedirs(args.fine_tune_model_path, exist_ok=True)
+    scene, gaussians = resume_gaussians_from_bitstream(args.base_model_path, args.base_source_path, get_logger(args.fine_tune_model_path))
+    anchor = gaussians.get_anchor.data.detach().cpu().numpy()
+    feat = gaussians._anchor_feat.data.detach().cpu().numpy()
+    offset = gaussians._offset.data.detach().cpu().numpy()
+    scaling = gaussians._scaling.data.detach().cpu().numpy()
+    with open('/home/ethan/Project/ESGS/ESGS.pkl', 'wb') as f:
+        pickle.dump(anchor, f)
+        pickle.dump(feat, f)
+        pickle.dump(offset, f)
+        pickle.dump(scaling, f)
+    print(1)
 
 if __name__ == "__main__":
     main()

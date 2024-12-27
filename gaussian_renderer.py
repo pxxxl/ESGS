@@ -23,6 +23,7 @@ from utils.encodings import STE_binary, STE_multistep
 from custom.encodings import STE_binary_with_ratio
 from custom.model import entropy_skipping
 from custom.recorder import record
+from custom.recorder import record, init_recorder, get_logger, init_tb_writer, tb_writer, tb
 
 
 def generate_neural_gaussians(viewpoint_camera, pc : GaussianModel, visible_mask=None, is_training=False, step=0):
@@ -60,7 +61,7 @@ def generate_neural_gaussians(viewpoint_camera, pc : GaussianModel, visible_mask
         if step == pc.step_begin_RD_training:
             pc.update_anchor_bound()
 
-        if step > pc.step_begin_RD_training and step <= pc.step_begin_entropy_skipping:
+        if step > pc.step_begin_RD_training:
             feat_context = pc.calc_interp_feat(anchor)
             feat_context = pc.get_grid_mlp(feat_context)
             mean, scale, mean_scaling, scale_scaling, mean_offsets, scale_offsets, Q_feat_adj, Q_scaling_adj, Q_offsets_adj = \
@@ -97,51 +98,11 @@ def generate_neural_gaussians(viewpoint_camera, pc : GaussianModel, visible_mask
             bit_per_offsets_param = torch.sum(bit_offsets) / bit_offsets.numel() * mask_anchor_rate
             bit_per_param = (torch.sum(bit_feat) + torch.sum(bit_scaling) + torch.sum(bit_offsets)) / \
                             (bit_feat.numel() + bit_scaling.numel() + bit_offsets.numel()) * mask_anchor_rate
-                            
-        if step > pc.step_begin_entropy_skipping:
-            feat_context = pc.calc_interp_feat(anchor)
-            feat_context_A = pc.get_grid_mlp(feat_context)
-            feat_context_B = pc.get_mask_mlp(feat_context)
-            STE_mask = STE_binary_with_ratio.apply(feat_context_B, pc.es_ratio)
-            mean, scale, mean_scaling, scale_scaling, mean_offsets, scale_offsets, Q_feat_adj, Q_scaling_adj, Q_offsets_adj = \
-                torch.split(feat_context_A, split_size_or_sections=[pc.feat_dim, pc.feat_dim, 6, 6, 3*pc.n_offsets, 3*pc.n_offsets, 1, 1, 1], dim=-1)
-
-            Q_feat = Q_feat * (1 + torch.tanh(Q_feat_adj))
-            Q_scaling = Q_scaling * (1 + torch.tanh(Q_scaling_adj))
-            Q_offsets = Q_offsets * (1 + torch.tanh(Q_offsets_adj))
-            feat = feat + torch.empty_like(feat).uniform_(-0.5, 0.5) * Q_feat
-            grid_scaling = grid_scaling + torch.empty_like(grid_scaling).uniform_(-0.5, 0.5) * Q_scaling
-            grid_offsets = grid_offsets + torch.empty_like(grid_offsets).uniform_(-0.5, 0.5) * Q_offsets.unsqueeze(1)
-
-            choose_idx = torch.rand_like(anchor[:, 0]) <= 0.05
-            choose_idx = choose_idx & mask_anchor_bool
-            feat_chosen = feat[choose_idx]
-            grid_scaling_chosen = grid_scaling[choose_idx]
-            grid_offsets_chosen = grid_offsets[choose_idx].view(-1, 3*pc.n_offsets)
-            mean = mean[choose_idx]
-            scale = scale[choose_idx]
-            mean_scaling = mean_scaling[choose_idx]
-            scale_scaling = scale_scaling[choose_idx]
-            mean_offsets = mean_offsets[choose_idx]
-            scale_offsets = scale_offsets[choose_idx]
-            Q_feat = Q_feat[choose_idx]
-            Q_scaling = Q_scaling[choose_idx]
-            Q_offsets = Q_offsets[choose_idx]
-            STE_mask = STE_mask[choose_idx]
-            binary_grid_masks_chosen = binary_grid_masks[choose_idx].repeat(1, 1, 3).view(-1, 3*pc.n_offsets)
-            bit_feat_raw = pc.entropy_gaussian.forward(feat_chosen, mean, scale, Q_feat, pc._anchor_feat.mean())
-            bit_feat = entropy_skipping(feat_chosen, mean, scale, Q_feat, pc._anchor_feat.mean(), STE_mask=STE_mask)
-            record(['Bit Feat Raw'], bit_feat_raw.mean().item())
-            record(['Bit Feat'], bit_feat.mean().item())
-            bit_scaling = pc.entropy_gaussian.forward(grid_scaling_chosen, mean_scaling, scale_scaling, Q_scaling, pc.get_scaling.mean())
-            bit_offsets = pc.entropy_gaussian.forward(grid_offsets_chosen, mean_offsets, scale_offsets, Q_offsets, pc._offset.mean())
-            bit_offsets = bit_offsets * binary_grid_masks_chosen
-            bit_per_feat_param = torch.sum(bit_feat) / bit_feat.numel() * mask_anchor_rate
-            bit_per_scaling_param = torch.sum(bit_scaling) / bit_scaling.numel() * mask_anchor_rate
-            bit_per_offsets_param = torch.sum(bit_offsets) / bit_offsets.numel() * mask_anchor_rate
-            bit_per_param = (torch.sum(bit_feat) + torch.sum(bit_scaling) + torch.sum(bit_offsets)) / \
-                            (bit_feat.numel() + bit_scaling.numel() + bit_offsets.numel()) * mask_anchor_rate
-
+            tb().add_scalar("train/bit/feat", bit_per_feat_param, step)
+            tb().add_scalar("train/bit/scaling", bit_per_scaling_param, step)
+            tb().add_scalar("train/bit/offsets", bit_per_offsets_param, step)
+            tb().add_scalar("train/bit/param", bit_per_param, step)
+           
     elif not pc.decoded_version:
         torch.cuda.synchronize(); t1 = time.time()
         feat_context = pc.calc_interp_feat(anchor)
