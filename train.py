@@ -35,7 +35,7 @@ from arguments import ModelParams, PipelineParams, OptimizationParams, get_proje
 from utils.encodings import get_binary_vxl_size
 from lpipsPyTorch import lpips
 from custom.encodings import STE_binary_with_ratio
-from custom.model import entropy_skipping
+from custom.model import entropy_skipping, conduct_entropy_skipping_inplace
 from custom.recorder import record, init_recorder, get_logger, init_tb_writer, tb_writer, tb
 import pickle
 from torch.utils.tensorboard import SummaryWriter
@@ -128,13 +128,17 @@ def training(args_param, dataset, opt, pipe, testing_iterations, saving_iteratio
                 progress_bar.update(10)
             if iteration == opt.iterations:
                 progress_bar.close()
+                
+            if iteration > opt.update_until:
+                voxel_visible_mask = prefilter_voxel(viewpoint_cam, gaussians, pipe, background)
+                conduct_entropy_skipping_inplace(viewpoint_cam, gaussians, voxel_visible_mask)
 
             # Log and save
             torch.cuda.synchronize(); t_start_log = time.time()
-            if iteration == testing_iterations[-1]:
-                apply_coding(gaussians, logger, args_param.model_path)
             if iteration in testing_iterations:
                 apply_testing(scene, (pipe, background), logger)
+            if iteration == testing_iterations[-1]:
+                apply_coding(gaussians, logger, args_param.model_path)
             if (iteration in saving_iterations):
                 logger.info("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)

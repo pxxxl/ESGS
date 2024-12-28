@@ -105,3 +105,38 @@ def evaluate_entropy_skipping(x_raw, x_skip, mean, scale):
     cdf_raw = m1.cdf(x_raw)
     metric_3 = (1 - 2 * torch.abs(cdf_raw - 0.5)).mean().item()
     return metric_1, metric_2, metric_3
+
+def conduct_entropy_skipping_inplace(viewpoint_camera, pc, visible_mask=None):
+    if visible_mask is None:
+        visible_mask = torch.ones(pc.get_anchor.shape[0], dtype=torch.bool, device = pc.get_anchor.device)
+        
+    Q_feat = 1
+
+    anchor = pc.get_anchor[visible_mask]
+    feat = pc._anchor_feat[visible_mask]
+    mask_anchor = pc.get_mask_anchor[visible_mask]
+    mask_anchor_bool = mask_anchor.to(torch.bool)
+
+    feat_context = pc.calc_interp_feat(anchor)
+    STE_mask_raw = pc.get_ste_mlp(feat_context)
+    STE_mask = STE_binary_with_ratio.apply(STE_mask_raw)
+    feat_context = pc.get_grid_mlp(feat_context)
+    mean, scale, _, _, _, _, Q_feat_adj, _, _ = \
+        torch.split(feat_context, split_size_or_sections=[pc.feat_dim, pc.feat_dim, 6, 6, 3*pc.n_offsets, 3*pc.n_offsets, 1, 1, 1], dim=-1)
+
+    Q_feat = Q_feat * (1 + torch.tanh(Q_feat_adj))
+    feat = feat + torch.empty_like(feat).uniform_(-0.5, 0.5) * Q_feat
+    choose_idx = mask_anchor_bool
+    feat_chosen = feat[choose_idx]
+    mean = mean[choose_idx]
+    scale = scale[choose_idx]
+    Q_feat = Q_feat[choose_idx]
+    bit_feat_raw = pc.entropy_gaussian.forward(feat_chosen, mean, scale, Q_feat, pc._anchor_feat.mean())
+    bit_feat = entropy_skipping(feat_chosen, mean, scale, Q_feat, pc._anchor_feat.mean(), STE_mask=STE_mask, inplace=True)
+    conbined_mask = visible_mask.clone()
+    conbined_mask[visible_mask] = choose_idx
+    pc._anchor_feat[conbined_mask] = feat_chosen
+    bit_per_feat_raw_param = torch.sum(bit_feat_raw) / bit_feat_raw.numel()
+    bit_per_feat_param = torch.sum(bit_feat) / bit_feat.numel()
+    print('bit_per_feat_raw_param: ', bit_per_feat_raw_param.item())
+    print('bit_per_feat_param: ', bit_per_feat_param.item())

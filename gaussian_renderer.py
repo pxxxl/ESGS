@@ -63,6 +63,8 @@ def generate_neural_gaussians(viewpoint_camera, pc : GaussianModel, visible_mask
 
         if step > pc.step_begin_RD_training:
             feat_context = pc.calc_interp_feat(anchor)
+            STE_mask_raw = pc.get_ste_mlp(feat_context)
+            STE_mask = STE_binary_with_ratio.apply(STE_mask_raw)
             feat_context = pc.get_grid_mlp(feat_context)
             mean, scale, mean_scaling, scale_scaling, mean_offsets, scale_offsets, Q_feat_adj, Q_scaling_adj, Q_offsets_adj = \
                 torch.split(feat_context, split_size_or_sections=[pc.feat_dim, pc.feat_dim, 6, 6, 3*pc.n_offsets, 3*pc.n_offsets, 1, 1, 1], dim=-1)
@@ -88,17 +90,21 @@ def generate_neural_gaussians(viewpoint_camera, pc : GaussianModel, visible_mask
             Q_feat = Q_feat[choose_idx]
             Q_scaling = Q_scaling[choose_idx]
             Q_offsets = Q_offsets[choose_idx]
+            STE_mask = STE_mask[choose_idx]
             binary_grid_masks_chosen = binary_grid_masks[choose_idx].repeat(1, 1, 3).view(-1, 3*pc.n_offsets)
-            bit_feat = pc.entropy_gaussian.forward(feat_chosen, mean, scale, Q_feat, pc._anchor_feat.mean())
+            bit_feat_raw = pc.entropy_gaussian.forward(feat_chosen, mean, scale, Q_feat, pc._anchor_feat.mean())
+            bit_feat = entropy_skipping(feat_chosen, mean, scale, Q_feat, pc._anchor_feat.mean(), STE_mask=STE_mask)
             bit_scaling = pc.entropy_gaussian.forward(grid_scaling_chosen, mean_scaling, scale_scaling, Q_scaling, pc.get_scaling.mean())
             bit_offsets = pc.entropy_gaussian.forward(grid_offsets_chosen, mean_offsets, scale_offsets, Q_offsets, pc._offset.mean())
             bit_offsets = bit_offsets * binary_grid_masks_chosen
+            bit_per_feat_raw_param = torch.sum(bit_feat_raw) / bit_feat_raw.numel() * mask_anchor_rate
             bit_per_feat_param = torch.sum(bit_feat) / bit_feat.numel() * mask_anchor_rate
             bit_per_scaling_param = torch.sum(bit_scaling) / bit_scaling.numel() * mask_anchor_rate
             bit_per_offsets_param = torch.sum(bit_offsets) / bit_offsets.numel() * mask_anchor_rate
             bit_per_param = (torch.sum(bit_feat) + torch.sum(bit_scaling) + torch.sum(bit_offsets)) / \
                             (bit_feat.numel() + bit_scaling.numel() + bit_offsets.numel()) * mask_anchor_rate
             tb().add_scalar("train/bit/feat", bit_per_feat_param, step)
+            tb().add_scalar("train/bit/feat_raw", bit_per_feat_raw_param, step)
             tb().add_scalar("train/bit/scaling", bit_per_scaling_param, step)
             tb().add_scalar("train/bit/offsets", bit_per_offsets_param, step)
             tb().add_scalar("train/bit/param", bit_per_param, step)
