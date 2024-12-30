@@ -2,10 +2,11 @@ lmbda_list = [0.004]
 scene_list = ['amsterdam']
 dataset_path = '/home/ethan/Project/Python/HAC/data/bungeenerf'
 
-enable_debug = True
+enable_debug = False
 iterations = 300
 step_begin_quantization = 30
 step_begin_RD_training = 100
+CUDA = 0
 
 
 import os
@@ -39,9 +40,16 @@ def run_train():
                     "--update_interval", "10",
                     "--update_until", "150"
                 ]
+            else:
+                sys_argv_str = f"CUDA_VISIBLE_DEVICE={CUDA} python "
+                for arg in sys.argv:
+                    sys_argv_str += arg
+                    sys_argv_str += " "
             
-            # 调用 main 方法
-            train.main()
+            if enable_debug:
+                train.main()
+            else:
+                os.system(sys_argv_str)
 
 if __name__ == "__main__":
     run_train()
