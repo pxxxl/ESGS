@@ -137,9 +137,11 @@ def generate_neural_gaussians(viewpoint_camera, pc : GaussianModel, visible_mask
             feat[:, ::1, :1]*bank_weight[:, :, 2:]
         feat = feat.squeeze(dim=-1)  # [N_visible_anchor, 32]
 
+    ngp_feat = pc.calc_interp_feat_2(anchor)  # [N_visible_anchor, 32]
     cat_local_view = torch.cat([feat, ob_view, ob_dist], dim=1)  # [N_visible_anchor, 32+3+1]
+    cat_local_view_plus_ngp = torch.cat([cat_local_view, ngp_feat], dim=1)  # [N_visible_anchor, 32+3+1+3]
 
-    neural_opacity = pc.get_opacity_mlp(cat_local_view)  # [N_visible_anchor, K]
+    neural_opacity = pc.get_opacity_mlp(cat_local_view_plus_ngp)  # [N_visible_anchor, K]
     neural_opacity = neural_opacity.reshape([-1, 1])  # [N_visible_anchor*K, 1]
     neural_opacity = neural_opacity * binary_grid_masks.view(-1, 1)
     mask = (neural_opacity > 0.0)
@@ -149,14 +151,12 @@ def generate_neural_gaussians(viewpoint_camera, pc : GaussianModel, visible_mask
     opacity = neural_opacity[mask]  # [N_opacity_pos_gaussian, 1]
 
     # get offset's color
-    ngp_feat = pc.calc_interp_feat_2(anchor)  # [N_visible_anchor, 32]
-    cat_ngp_local_view = torch.cat([ngp_feat, ob_view, ob_dist], dim=1)
-    color = pc.get_color_ngp_mlp(cat_ngp_local_view)
+    color = pc.get_color_mlp(cat_local_view_plus_ngp)
     # color = pc.get_color_mlp(cat_local_view)  # [N_visible_anchor, K*3]
     color = color.reshape([anchor.shape[0] * pc.n_offsets, 3])  # [N_visible_anchor*K, 3]
 
     # get offset's cov
-    scale_rot = pc.get_cov_mlp(cat_local_view)  # [N_visible_anchor, K*7]
+    scale_rot = pc.get_cov_mlp(cat_local_view_plus_ngp)  # [N_visible_anchor, K*7]
     scale_rot = scale_rot.reshape([anchor.shape[0] * pc.n_offsets, 7])  # [N_visible_anchor*K, 7]
 
     offsets = grid_offsets.view([-1, 3])  # [N_visible_anchor*K, 3]

@@ -252,23 +252,23 @@ class GaussianModel(nn.Module):
         mlp_input_feat_dim = feat_dim
 
         self.mlp_opacity = nn.Sequential(
-            nn.Linear(mlp_input_feat_dim+3+1, feat_dim),
+            nn.Linear(self.encoding_xyz.output_dim+mlp_input_feat_dim+3+1, feat_dim * 2),
             nn.ReLU(True),
-            nn.Linear(feat_dim, n_offsets),
+            nn.Linear(feat_dim * 2, n_offsets),
             nn.Tanh()
         ).cuda()
 
         self.mlp_cov = nn.Sequential(
-            nn.Linear(mlp_input_feat_dim+3+1, feat_dim),
+            nn.Linear(self.encoding_xyz.output_dim+mlp_input_feat_dim+3+1, feat_dim * 2),
             nn.ReLU(True),
-            nn.Linear(feat_dim, 7*self.n_offsets),
+            nn.Linear(feat_dim * 2, 7*self.n_offsets),
             # nn.Linear(feat_dim, 7),
         ).cuda()
 
         self.mlp_color = nn.Sequential(
-            nn.Linear(mlp_input_feat_dim+3+1, feat_dim),
+            nn.Linear(self.encoding_xyz.output_dim+mlp_input_feat_dim+3+1, feat_dim * 2),
             nn.ReLU(True),
-            nn.Linear(feat_dim, 3*self.n_offsets),
+            nn.Linear(feat_dim * 2, 3*self.n_offsets),
             nn.Sigmoid()
         ).cuda()
 

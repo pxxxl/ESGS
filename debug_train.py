@@ -27,7 +27,8 @@ def run_train():
                 "-m", f"outputs/{os.path.basename(dataset_path)}/{scene}/{lmbda}_ESGS",
                 "--lmbda", str(lmbda),
                 "--step_begin_quantization", str(step_begin_quantization),
-                "--step_begin_RD_training", str(step_begin_RD_training)
+                "--step_begin_RD_training", str(step_begin_RD_training),
+                "--feat_dim", "40"
             ]
             if enable_debug:
                 sys.argv += [
