@@ -40,6 +40,7 @@ from utils.encodings_cuda import \
 from custom.encodings import STE_binary_with_ratio
 from custom.model import entropy_skipping
 from custom.recorder import record
+from custom.draco import attribute_reform, estimate_anchor_bits_using_draco, encode_anchor_using_draco, decode_anchor_using_draco
 
 bit2MB_scale = 8 * 1024 * 1024
 
@@ -1031,6 +1032,7 @@ class GaussianModel(nn.Module):
         mask_anchor = self.get_mask_anchor
 
         _anchor = self.get_anchor[mask_anchor]
+        _quantize_v = self.get_quantized_v[mask_anchor]
         _feat = self._anchor_feat[mask_anchor]
         _grid_offsets = self._offset[mask_anchor]
         _scaling = self.get_scaling[mask_anchor]
@@ -1055,7 +1057,9 @@ class GaussianModel(nn.Module):
         bit_offsets = self.entropy_gaussian.forward(offsets, mean_offsets, scale_offsets, Q_offsets)
         bit_offsets = bit_offsets * mask_tmp
 
-        bit_anchor = _anchor.shape[0]*3*anchor_round_digits
+        # bit_anchor = _anchor.shape[0]*3*anchor_round_digits
+        os.makedirs('./temp', exist_ok=True)
+        bit_anchor = estimate_anchor_bits_using_draco(_quantize_v, temp_folder_path='./temp')
         bit_feat = torch.sum(bit_feat).item()
         bit_scaling = torch.sum(bit_scaling).item()
         bit_offsets = torch.sum(bit_offsets).item()
@@ -1104,10 +1108,16 @@ class GaussianModel(nn.Module):
         _grid_offsets = self._offset[mask_anchor]
         _scaling = self.get_scaling[mask_anchor]
         _mask = self.get_mask[mask_anchor]
+        
+        reformd_anchor, att_list = attribute_reform(_quantized_v, [_anchor, _feat, _grid_offsets, _scaling, _mask])
+        _anchor, _feat, _grid_offsets, _scaling, _mask = att_list
+        _quantized_v = reformd_anchor
+        
 
         # torch.save(_anchor, os.path.join(pre_path_name, 'anchor.pkl'))
         _quantized_v = _quantized_v.cpu().detach().numpy().astype(np.uint16)
         np.save(os.path.join(pre_path_name, '_quantized_v.npy'), _quantized_v)
+        encode_anchor_using_draco(_quantized_v, os.path.join(pre_path_name, '_d_quantized_v.ply'), anchor_round_digits)
 
         N = _anchor.shape[0]
         MAX_batch_size = 2_000
@@ -1180,7 +1190,8 @@ class GaussianModel(nn.Module):
 
             torch.cuda.empty_cache()
 
-        bit_anchor = N * 3 * anchor_round_digits
+        # bit_anchor = N * 3 * anchor_round_digits
+        bit_anchor = os.path.getsize(os.path.join(pre_path_name, '_d_quantized_v.drc')) * 8
         bit_feat = sum(bit_feat_list)
         bit_scaling = sum(bit_scaling_list)
         bit_offsets = sum(bit_offsets_list)
@@ -1192,6 +1203,9 @@ class GaussianModel(nn.Module):
             bit_hash = hash_embeddings.numel()*32
 
         bit_masks = encoder(_mask, file_name=masks_b_name)
+        
+        
+        
         
         self.save_min_max(pre_path_name)
         
@@ -1244,8 +1258,8 @@ class GaussianModel(nn.Module):
             hash_embeddings = (hash_embeddings * 2 - 1).to(torch.float32)
             hash_embeddings = hash_embeddings.view(-1, self.n_features_per_level)
 
-        # anchor_decoded = torch.load(os.path.join(pre_path_name, 'anchor.pkl')).cuda()
-        _quantized_v_decoded = np.load(os.path.join(pre_path_name, '_quantized_v.npy')).astype(np.int32)
+        # _quantized_v_decoded = np.load(os.path.join(pre_path_name, '_quantized_v.npy')).astype(np.int32)
+        _quantized_v_decoded = decode_anchor_using_draco(os.path.join(pre_path_name, '_d_quantized_v.drc'))
         _quantized_v_decoded = torch.from_numpy(_quantized_v_decoded).cuda().to(torch.int32)
         interval = ((self.x_bound_max - self.x_bound_min) * Q_anchor + 1e-6)  # avoid 0, if max_v == min_v
         anchor_decoded = _quantized_v_decoded * interval + self.x_bound_min

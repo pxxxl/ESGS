@@ -2,7 +2,7 @@ lmbda_list = [0.004]
 scene_list = ['amsterdam']
 dataset_path = '/home/ethan/Project/Python/HAC/data/bungeenerf'
 
-enable_debug = False
+enable_debug = True
 iterations = 300
 step_begin_quantization = 30
 step_begin_RD_training = 100
@@ -13,6 +13,12 @@ import os
 import argparse
 import train 
 import sys
+import shutil
+
+encoder_path = shutil.which("draco_encoder")
+if encoder_path is None:
+    print("draco_encoder not found in PATH")
+    exit(1)
 
 def run_train():
     for lmbda in lmbda_list:
