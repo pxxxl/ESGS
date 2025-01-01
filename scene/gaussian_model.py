@@ -40,7 +40,7 @@ from utils.encodings_cuda import \
 from custom.encodings import STE_binary_with_ratio
 from custom.model import entropy_skipping
 from custom.recorder import record
-from custom.draco import attribute_reform, estimate_anchor_bits_using_draco, encode_anchor_using_draco, decode_anchor_using_draco
+from custom.draco import attribute_reform, estimate_anchor_bits_using_draco, draco_encode, draco_decode
 
 bit2MB_scale = 8 * 1024 * 1024
 
@@ -1114,10 +1114,12 @@ class GaussianModel(nn.Module):
         _quantized_v = reformd_anchor
         
 
+        
+
         # torch.save(_anchor, os.path.join(pre_path_name, 'anchor.pkl'))
         _quantized_v = _quantized_v.cpu().detach().numpy().astype(np.uint16)
         np.save(os.path.join(pre_path_name, '_quantized_v.npy'), _quantized_v)
-        encode_anchor_using_draco(_quantized_v, os.path.join(pre_path_name, '_d_quantized_v.ply'), anchor_round_digits)
+        draco_encode(os.path.join(pre_path_name, '_quantized_v.npy'), os.path.join(pre_path_name, '_quantized_v.drc'), qp=anchor_round_digits)
 
         N = _anchor.shape[0]
         MAX_batch_size = 2_000
@@ -1258,8 +1260,8 @@ class GaussianModel(nn.Module):
             hash_embeddings = (hash_embeddings * 2 - 1).to(torch.float32)
             hash_embeddings = hash_embeddings.view(-1, self.n_features_per_level)
 
-        # _quantized_v_decoded = np.load(os.path.join(pre_path_name, '_quantized_v.npy')).astype(np.int32)
-        _quantized_v_decoded = decode_anchor_using_draco(os.path.join(pre_path_name, '_d_quantized_v.drc'))
+        _quantized_v_decoded = draco_decode(os.path.join(pre_path_name, '_quantized_v.drc'), os.path.join(pre_path_name, '_quantized_v_de.npy'))
+        _quantized_v_decoded = np.load(os.path.join(pre_path_name, '_quantized_v_de.npy')).astype(np.int32)
         _quantized_v_decoded = torch.from_numpy(_quantized_v_decoded).cuda().to(torch.int32)
         interval = ((self.x_bound_max - self.x_bound_min) * Q_anchor + 1e-6)  # avoid 0, if max_v == min_v
         anchor_decoded = _quantized_v_decoded * interval + self.x_bound_min
