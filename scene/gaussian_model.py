@@ -1193,7 +1193,7 @@ class GaussianModel(nn.Module):
             torch.cuda.empty_cache()
 
         # bit_anchor = N * 3 * anchor_round_digits
-        bit_anchor = os.path.getsize(os.path.join(pre_path_name, '_d_quantized_v.drc')) * 8
+        bit_anchor = os.path.getsize(os.path.join(pre_path_name, '_quantized_v.drc')) * 8
         bit_feat = sum(bit_feat_list)
         bit_scaling = sum(bit_scaling_list)
         bit_offsets = sum(bit_offsets_list)

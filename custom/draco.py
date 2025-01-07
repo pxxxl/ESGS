@@ -59,7 +59,10 @@ def attribute_reform(anchor, attribute_list):
         raise ValueError("The first dimension of anchor and the first dimension of the first element of attribute_list must be the same")
     
     # Sort the anchor by x from small to large, if x is the same, sort by y, if y is the same, sort by z
-    sorted_indices = torch.argsort(anchor[:, 0] + anchor[:, 1] * 1e-6 + anchor[:, 2] * 1e-12)
+    sorted_indices = torch.arange(anchor.size(0), device=anchor.device)
+    for col in range(anchor.size(1) - 1, -1, -1):
+        sorted_indices = sorted_indices[torch.argsort(anchor[sorted_indices, col])]
+
     anchor = anchor[sorted_indices]
     attribute_list = [attribute[sorted_indices] for attribute in attribute_list]
     
@@ -76,7 +79,7 @@ def attribute_reform_np(anchor, attribute_list):
         raise ValueError("Input anchor must have shape (N, 3)")
     
     # Sort the anchor by x from small to large, if x is the same, sort by y, if y is the same, sort by z
-    sorted_indices = np.argsort(anchor[:, 0] + anchor[:, 1] * 1e-6 + anchor[:, 2] * 1e-12)
+    sorted_indices = np.lexsort((anchor[:, 2], anchor[:, 1], anchor[:, 0]))
     anchor = anchor[sorted_indices]
     attribute_list = [attribute[sorted_indices] for attribute in attribute_list]
     
@@ -128,86 +131,6 @@ def draco_decode(drc_path, npy_path):
     decompress_ply_with_draco(drc_path, ply_path)
     ply_to_npy(ply_path, npy_path)
     
-    
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-def encode_anchor_using_draco(_quantized_v, _quantized_v_ply_file_path, qp=16):
-    anchor_np = _quantized_v.cpu().numpy().astype(np.int32)
-    write_anchor_to_ply(anchor_np, _quantized_v_ply_file_path)
-    draco_encode_cmd = f"draco_encoder -i {_quantized_v_ply_file_path} -o {_quantized_v_ply_file_path[:-4]}.drc -point_cloud -qp {qp} -point_cloud"
-    os.system(draco_encode_cmd)
-    compressed_size = os.path.getsize(_quantized_v_ply_file_path[:-4] + ".drc")
-    return compressed_size
-
-
-def decode_anchor_using_draco(_quantized_v_ply_file_path):
-    _compressed_v_drc_file_path = _quantized_v_ply_file_path[:-4] + ".drc"
-    decoded_path = _compressed_v_drc_file_path[:-4] + "_decoded.ply"
-    draco_decode_cmd = f"draco_decoder -i {_compressed_v_drc_file_path} -o {decoded_path} -point_cloud"
-    os.system(draco_decode_cmd)
-    # read the decoded ply file
-    points = o3d.io.read_point_cloud(decoded_path)
-    array = np.asarray(points.points)
-    sorted_indices = np.argsort(array[:, 0] + array[:, 1] * 1e-6 + array[:, 2] * 1e-12)
-    _decoded_quantized_v = array[sorted_indices]
-    return _decoded_quantized_v
-    
-def encode_decoder_simulate(_quantized_v, temp_folder_path='./temp/', qp=16):
-    # input: reformed tensor _quantized_v, >0, float, but all uint
-    anchor_np = _quantized_v.cpu().numpy().astype(np.int32)
-    write_anchor_to_ply(anchor_np, os.path.join(temp_folder_path, "_temp_quantized_v.ply"))
-    
-    draco_encode_cmd = f"draco_encoder -i {os.path.join(temp_folder_path, '_temp_quantized_v.ply')} -o {os.path.join(temp_folder_path, '_temp_quantized_v.drc')} -point_cloud -qp {qp} -point_cloud"
-    os.system(draco_encode_cmd)
-    
-    draco_decode_cmd = f"draco_decoder -i {os.path.join(temp_folder_path, '_temp_quantized_v.drc')} -o {os.path.join(temp_folder_path, '_temp_quantized_v_decoded.ply')} -point_cloud"
-    os.system(draco_decode_cmd)
-    
-    points = o3d.io.read_point_cloud(os.path.join(temp_folder_path, "_temp_quantized_v_decoded.ply"))
-    decoded_quantized_v = np.asarray(points.points, dtype=np.int32)
-    sorted_indices = np.argsort(decoded_quantized_v[:, 0] + decoded_quantized_v[:, 1] * 1e-6 + decoded_quantized_v[:, 2] * 1e-12)
-    _decoded_quantized_v2= decoded_quantized_v[sorted_indices]
-    
-    # chech if the decoded quantized_v is the same as the original quantized_v
-    print(anchor_np - _decoded_quantized_v2)
     
     
