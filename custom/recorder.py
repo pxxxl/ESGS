@@ -9,6 +9,11 @@ train = True
 
 def init_tb_writer(folder: str = "."):
     global tb_writer
+    # delete the folder if it exists
+    if os.path.exists(folder):
+        import shutil
+        shutil.rmtree(folder)
+    os.makedirs(folder, exist_ok=True)
     tb_writer = SummaryWriter(folder)
     return
 

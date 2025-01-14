@@ -3,9 +3,9 @@ scene_list = ['amsterdam']
 dataset_path = '/home/ethan/Project/Python/HAC/data/bungeenerf'
 
 enable_debug = True
-iterations = 300
-step_begin_quantization = 30
-step_begin_RD_training = 100
+iterations = 5000
+step_begin_quantization = 200
+step_begin_RD_training = 2000
 
 
 import os
@@ -24,7 +24,7 @@ def run_train():
                 "--lod", "30",
                 "--voxel_size", "0",
                 "--update_init_factor", "128",
-                "-m", f"outputs/{os.path.basename(dataset_path)}/{scene}/{lmbda}_ESGS",
+                "-m", f"outputs/{os.path.basename(dataset_path)}/{scene}/{lmbda}_ESGS_STE",
                 "--lmbda", str(lmbda),
                 "--step_begin_quantization", str(step_begin_quantization),
                 "--step_begin_RD_training", str(step_begin_RD_training)
@@ -34,10 +34,10 @@ def run_train():
                     "--iterations", f"{iterations}",
                     "--test_iterations", f"{iterations}",
                     "--save_iterations", f"{iterations}",
-                    "--start_stat", "160",
-                    "--update_from", "160",
-                    "--update_interval", "10",
-                    "--update_until", "150"
+                    "--start_stat", "200",
+                    "--update_from", "200",
+                    "--update_interval", "100",
+                    "--update_until", "2000"
                 ]
             
             # 调用 main 方法

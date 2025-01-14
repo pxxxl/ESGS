@@ -131,6 +131,7 @@ def conduct_entropy_skipping_inplace(viewpoint_camera, pc, visible_mask=None):
     mean = mean[choose_idx]
     scale = scale[choose_idx]
     Q_feat = Q_feat[choose_idx]
+    STE_mask = STE_mask[choose_idx]
     bit_feat_raw = pc.entropy_gaussian.forward(feat_chosen, mean, scale, Q_feat, pc._anchor_feat.mean())
     bit_feat = entropy_skipping(feat_chosen, mean, scale, Q_feat, pc._anchor_feat.mean(), STE_mask=STE_mask, inplace=True)
     conbined_mask = visible_mask.clone()

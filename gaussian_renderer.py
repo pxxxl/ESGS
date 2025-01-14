@@ -103,11 +103,7 @@ def generate_neural_gaussians(viewpoint_camera, pc : GaussianModel, visible_mask
             bit_per_offsets_param = torch.sum(bit_offsets) / bit_offsets.numel() * mask_anchor_rate
             bit_per_param = (torch.sum(bit_feat) + torch.sum(bit_scaling) + torch.sum(bit_offsets)) / \
                             (bit_feat.numel() + bit_scaling.numel() + bit_offsets.numel()) * mask_anchor_rate
-            tb().add_scalar("train/bit/feat", bit_per_feat_param, step)
             tb().add_scalar("train/bit/feat_raw", bit_per_feat_raw_param, step)
-            tb().add_scalar("train/bit/scaling", bit_per_scaling_param, step)
-            tb().add_scalar("train/bit/offsets", bit_per_offsets_param, step)
-            tb().add_scalar("train/bit/param", bit_per_param, step)
            
     elif not pc.decoded_version:
         torch.cuda.synchronize(); t1 = time.time()
@@ -179,8 +175,15 @@ def generate_neural_gaussians(viewpoint_camera, pc : GaussianModel, visible_mask
 
     offsets = offsets * scaling_repeat[:, :3]  # [N_opacity_pos_gaussian, 3]
     xyz = repeat_anchor + offsets  # [N_opacity_pos_gaussian, 3]
+    
+
 
     if is_training:
+        if bit_per_param is not None:
+            tb().add_scalar("train/bit/bit_per_feat_param", bit_per_feat_param, step)
+            tb().add_scalar("train/bit/bit_per_scaling_param", bit_per_scaling_param, step)
+            tb().add_scalar("train/bit/bit_per_offsets_param", bit_per_offsets_param, step)
+            tb().add_scalar("train/bit/bit_per_param", bit_per_param, step)
         return xyz, color, opacity, scaling, rot, neural_opacity, mask, bit_per_param, bit_per_feat_param, bit_per_scaling_param, bit_per_offsets_param
     else:
         return xyz, color, opacity, scaling, rot, time_sub
