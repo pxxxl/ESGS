@@ -8,3 +8,5 @@ nohup.out
 playground/
 base/
 temp/
+*.zip
+external/

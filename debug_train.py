@@ -1,8 +1,8 @@
-lmbda_list = [0.004]
+lmbda_list = [0.04]
 scene_list = ['amsterdam']
 dataset_path = '/home/ethan/Project/Python/HAC/data/bungeenerf'
 
-enable_debug = False
+enable_debug = True
 iterations = 300
 step_begin_quantization = 30
 step_begin_RD_training = 100
@@ -26,9 +26,7 @@ def run_train():
                 "--voxel_size", "0",
                 "--update_init_factor", "128",
                 "-m", f"outputs/{os.path.basename(dataset_path)}/{scene}/{lmbda}_ESGS",
-                "--lmbda", str(lmbda),
-                "--step_begin_quantization", str(step_begin_quantization),
-                "--step_begin_RD_training", str(step_begin_RD_training)
+                "--lmbda", str(lmbda)
             ]
             if enable_debug:
                 sys.argv += [
@@ -38,7 +36,9 @@ def run_train():
                     "--start_stat", "160",
                     "--update_from", "160",
                     "--update_interval", "10",
-                    "--update_until", "150"
+                    "--update_until", "150",
+                    "--step_begin_quantization", str(step_begin_quantization),
+                    "--step_begin_RD_training", str(step_begin_RD_training)
                 ]
             else:
                 sys_argv_str = f"CUDA_VISIBLE_DEVICE={CUDA} python "
