@@ -8,6 +8,13 @@ train = True
 
 
 def init_tb_writer(folder: str = "."):
+    # delete the old folder
+    import shutil
+    try:
+        shutil.rmtree(folder)
+    except:
+        pass
+    os.makedirs(folder, exist_ok=True)
     global tb_writer
     tb_writer = SummaryWriter(folder)
     return

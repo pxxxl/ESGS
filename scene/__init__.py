@@ -17,18 +17,19 @@ from scene.dataset_readers import sceneLoadTypeCallbacks
 from scene.gaussian_model import GaussianModel
 from arguments import ModelParams
 from utils.camera_utils import cameraList_from_camInfos, camera_to_JSON
+from typing import *
 
 class Scene:
 
     gaussians : GaussianModel
 
-    def __init__(self, args : ModelParams, gaussians : GaussianModel, load_iteration=None, shuffle=True, resolution_scales=[1.0], ply_path=None):
+    def __init__(self, args : ModelParams, gaussians_list : List[GaussianModel], load_iteration=None, shuffle=True, resolution_scales=[1.0], ply_path=None):
         """b
         :param path: Path to colmap scene main folder.
         """
         self.model_path = args.model_path
         self.loaded_iter = None
-        self.gaussians = gaussians
+        self.gaussians_list = gaussians_list
 
         if load_iteration:
             if load_iteration == -1:
@@ -83,22 +84,26 @@ class Scene:
             print("Loading Test Cameras")
             self.test_cameras[resolution_scale] = cameraList_from_camInfos(scene_info.test_cameras, resolution_scale, args)
 
-        if self.loaded_iter:
-            self.gaussians.load_ply_sparse_gaussian(os.path.join(self.model_path,
-                                                           "point_cloud",
-                                                           "iteration_" + str(self.loaded_iter),
-                                                           "point_cloud.ply"))
-            self.gaussians.load_mlp_checkpoints(os.path.join(self.model_path,
-                                                           "point_cloud",
-                                                           "iteration_" + str(self.loaded_iter),
-                                                           "checkpoint.pth"))
-        else:
-            self.gaussians.create_from_pcd(scene_info.point_cloud, self.cameras_extent)
+        for i in range(len(self.gaussians_list)):
+            if self.loaded_iter:
+                self.gaussians_list[i].load_ply_sparse_gaussian(os.path.join(self.model_path,
+                                                            "point_cloud",
+                                                            "iteration_" + str(self.loaded_iter),
+                                                            "point_cloud.ply"))
+                self.gaussians_list[i].load_mlp_checkpoints(os.path.join(self.model_path,
+                                                            "point_cloud",
+                                                            "iteration_" + str(self.loaded_iter),
+                                                            "checkpoint.pth"))
+            else:
+                self.gaussians_list[i].create_from_pcd(scene_info.point_cloud, self.cameras_extent)
 
     def save(self, iteration):
         point_cloud_path = os.path.join(self.model_path, "point_cloud/iteration_{}".format(iteration))
-        self.gaussians.save_ply(os.path.join(point_cloud_path, "point_cloud.ply"))
-        self.gaussians.save_mlp_checkpoints(os.path.join(point_cloud_path, "checkpoint.pth"))
+        for i in range(len(self.gaussians_list)):
+            gaussian_folder = os.path.join(point_cloud_path, str(i))
+            os.makedirs(gaussian_folder, exist_ok=True)
+            self.gaussians_list[i].save_ply(os.path.join(gaussian_folder, "point_cloud.ply"))
+            self.gaussians_list[i].save_mlp_checkpoints(os.path.join(gaussian_folder, "checkpoint.pth"))
 
     def getTrainCameras(self, scale=1.0):
         return self.train_cameras[scale]

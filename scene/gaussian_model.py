@@ -40,6 +40,7 @@ from utils.encodings_cuda import \
 from custom.encodings import STE_binary_with_ratio
 from custom.model import entropy_skipping
 from custom.recorder import record
+from custom.prediction import K_neighbor_extraction, feat_collection, K_neighbor_extraction_batch
 
 bit2MB_scale = 8 * 1024 * 1024
 
@@ -129,6 +130,7 @@ class GaussianModel(nn.Module):
 
     def __init__(self,
                  feat_dim: int=50,
+                 hir_feat_dim: int=64,
                  n_offsets: int=5,
                  voxel_size: float=0.01,
                  update_depth: int=3,
@@ -146,6 +148,7 @@ class GaussianModel(nn.Module):
                  Q=1,
                  use_2D: bool=True,
                  decoded_version: bool=False,
+                 hir_division_ratio: float=0.3,
                  ):
         super().__init__()
         print('hash_params:', use_2D, n_features_per_level,
@@ -154,6 +157,7 @@ class GaussianModel(nn.Module):
               ste_binary, ste_multistep, add_noise)
 
         self.feat_dim = feat_dim
+        self.hir_feat_dim = hir_feat_dim
         self.n_offsets = n_offsets
         self.voxel_size = voxel_size
         self.update_depth = update_depth
@@ -173,6 +177,7 @@ class GaussianModel(nn.Module):
         self.Q = Q
         self.use_2D = use_2D
         self.decoded_version = decoded_version
+        self.hir_division_ratio = hir_division_ratio
 
         self._anchor = torch.empty(0)
         self._offset = torch.empty(0)
@@ -195,6 +200,8 @@ class GaussianModel(nn.Module):
         self.percent_dense = 0
         self.spatial_lr_scale = 0
         self.setup_functions()
+        
+        self.anchor_neighbor_index_cache = None
 
         if use_2D:
             self.encoding_xyz = mix_3D2D_encoding(
@@ -276,6 +283,54 @@ class GaussianModel(nn.Module):
             nn.Linear(feat_dim*2, 2*self.n_offsets),
         ).cuda()
         self.mlp_deform[-1].bias.data[0::2] += 10.0
+        
+        
+        
+        
+        
+        self.hir_encoder_xyz = mix_3D2D_encoding(
+            n_features=n_features_per_level,
+            resolutions_list=resolutions_list,
+            log2_hashmap_size=log2_hashmap_size,
+            resolutions_list_2D=resolutions_list_2D,
+            log2_hashmap_size_2D=log2_hashmap_size_2D,
+            ste_binary=ste_binary,
+            ste_multistep=ste_multistep,
+            add_noise=add_noise,
+            Q=Q,
+        ).cuda()
+        
+        self.coord_encoder = nn.Sequential(
+            nn.Linear(self.hir_encoder_xyz.output_dim, hir_feat_dim),
+            nn.ReLU(),
+            nn.Linear(hir_feat_dim, hir_feat_dim),
+            nn.LayerNorm(hir_feat_dim)
+        ).cuda()
+        
+        self.feature_encoder = nn.Sequential(
+            nn.Linear(feat_dim + 3 * self.n_offsets + 6, hir_feat_dim),
+            nn.ReLU(),
+            nn.Linear(hir_feat_dim, hir_feat_dim),
+            nn.LayerNorm(hir_feat_dim)
+        ).cuda()
+        
+        self.joint_processor = nn.Sequential(
+            nn.Linear(hir_feat_dim*2, hir_feat_dim*2),
+            nn.ReLU(),
+            nn.Linear(hir_feat_dim*2, hir_feat_dim*2),
+            nn.LayerNorm(hir_feat_dim*2)
+        ).cuda()
+        
+        self.self_attn = nn.MultiheadAttention(embed_dim=hir_feat_dim*2, num_heads=4, dropout=0.1).cuda()
+        
+        self.output_net = nn.Sequential(
+            nn.Linear(hir_feat_dim*2, hir_feat_dim*4),
+            nn.ReLU(),
+            nn.Dropout(0.2),
+            nn.Linear(hir_feat_dim*4, (feat_dim+6+3*self.n_offsets)*2+1+1+1)
+        ).cuda()
+        
+        
 
         self.entropy_gaussian = Entropy_gaussian(Q=1).cuda()
 
@@ -308,6 +363,12 @@ class GaussianModel(nn.Module):
         self.mlp_grid.eval()
         self.mlp_mask.eval()
         self.mlp_deform.eval()
+        self.hir_encoder_xyz.eval()
+        self.coord_encoder.eval()
+        self.feature_encoder.eval()
+        self.joint_processor.eval()
+        self.self_attn.eval()
+        self.output_net.eval()
 
         if self.use_feat_bank:
             self.mlp_feature_bank.eval()
@@ -320,6 +381,12 @@ class GaussianModel(nn.Module):
         self.mlp_grid.train()
         self.mlp_mask.train()
         self.mlp_deform.train()
+        self.hir_encoder_xyz.train()
+        self.coord_encoder.train()
+        self.feature_encoder.train()
+        self.joint_processor.train()
+        self.self_attn.train()
+        self.output_net.train()
 
         if self.use_feat_bank:
             self.mlp_feature_bank.train()
@@ -413,13 +480,6 @@ class GaussianModel(nn.Module):
         return features
 
     @property
-    def set_anchor(self, new_anchor):
-        assert self._anchor.shape == new_anchor.shape
-        del self._anchor
-        torch.cuda.empty_cache()
-        self._anchor = new_anchor
-
-    @property
     def get_opacity(self):
         return self.opacity_activation(self._opacity)
 
@@ -502,6 +562,13 @@ class GaussianModel(nn.Module):
                 {'params': self.mlp_mask.parameters(), 'lr': training_args.mlp_grid_lr_init, "name": "mlp_mask"},
 
                 {'params': self.mlp_deform.parameters(), 'lr': training_args.mlp_deform_lr_init, "name": "mlp_deform"},
+                
+                {'params': self.coord_encoder.parameters(), 'lr': training_args.coord_encoder_lr_init, "name": "coord_encoder"},
+                {'params': self.feature_encoder.parameters(), 'lr': training_args.feature_encoder_lr_init, "name": "feature_encoder"},
+                {'params': self.joint_processor.parameters(), 'lr': training_args.joint_processor_lr_init, "name": "joint_processor"},
+                {'params': self.output_net.parameters(), 'lr': training_args.output_net_lr_init, "name": "output_net"},
+
+                {'params': self.self_attn.parameters(), 'lr': training_args.self_attn_lr_init, "name": "self_attn"},
             ]
         else:
             l = [
@@ -521,6 +588,13 @@ class GaussianModel(nn.Module):
                 {'params': self.mlp_grid.parameters(), 'lr': training_args.mlp_grid_lr_init, "name": "mlp_grid"},
 
                 {'params': self.mlp_deform.parameters(), 'lr': training_args.mlp_deform_lr_init, "name": "mlp_deform"},
+                
+                {'params': self.coord_encoder.parameters(), 'lr': training_args.coord_encoder_lr_init, "name": "coord_encoder"},
+                {'params': self.feature_encoder.parameters(), 'lr': training_args.feature_encoder_lr_init, "name": "feature_encoder"},
+                {'params': self.joint_processor.parameters(), 'lr': training_args.joint_processor_lr_init, "name": "joint_processor"},
+                {'params': self.output_net.parameters(), 'lr': training_args.output_net_lr_init, "name": "output_net"},
+
+                {'params': self.self_attn.parameters(), 'lr': training_args.self_attn_lr_init, "name": "self_attn"},
             ]
 
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
@@ -581,6 +655,38 @@ class GaussianModel(nn.Module):
                                                     lr_final=training_args.mlp_deform_lr_final,
                                                     lr_delay_mult=training_args.mlp_deform_lr_delay_mult,
                                                     max_steps=training_args.mlp_deform_lr_max_steps)
+        
+        self.hir_encoder_xyz_scheduler_args = get_expon_lr_func(lr_init=training_args.encoding_xyz_lr_init,
+                                                    lr_final=training_args.encoding_xyz_lr_final,
+                                                    lr_delay_mult=training_args.encoding_xyz_lr_delay_mult,
+                                                    max_steps=training_args.encoding_xyz_lr_max_steps,
+                                                             step_sub=0 if self.ste_binary else 10000,
+                                                             )
+        
+        self.coord_encoder_scheduler_args = get_expon_lr_func(lr_init=training_args.coord_encoder_lr_init,
+                                                    lr_final=training_args.coord_encoder_lr_final,
+                                                    lr_delay_mult=training_args.coord_encoder_lr_delay_mult,
+                                                    max_steps=training_args.coord_encoder_lr_max_steps)
+        
+        self.feature_encoder_scheduler_args = get_expon_lr_func(lr_init=training_args.feature_encoder_lr_init,
+                                                    lr_final=training_args.feature_encoder_lr_final,
+                                                    lr_delay_mult=training_args.feature_encoder_lr_delay_mult,
+                                                    max_steps=training_args.feature_encoder_lr_max_steps)
+        
+        self.joint_processor_scheduler_args = get_expon_lr_func(lr_init=training_args.joint_processor_lr_init,
+                                                    lr_final=training_args.joint_processor_lr_final,
+                                                    lr_delay_mult=training_args.joint_processor_lr_delay_mult,
+                                                    max_steps=training_args.joint_processor_lr_max_steps)
+        
+        self.self_attn_scheduler_args = get_expon_lr_func(lr_init=training_args.self_attn_lr_init,
+                                                    lr_final=training_args.self_attn_lr_final,
+                                                    lr_delay_mult=training_args.self_attn_lr_delay_mult,
+                                                    max_steps=training_args.self_attn_lr_max_steps)
+        
+        self.output_net_scheduler_args = get_expon_lr_func(lr_init=training_args.output_net_lr_init,
+                                                    lr_final=training_args.output_net_lr_final,
+                                                    lr_delay_mult=training_args.output_net_lr_delay_mult,
+                                                    max_steps=training_args.output_net_lr_max_steps)
 
     def update_learning_rate(self, iteration):
         ''' Learning rate scheduling per step '''
@@ -618,6 +724,23 @@ class GaussianModel(nn.Module):
             if param_group["name"] == "mlp_deform":
                 lr = self.mlp_deform_scheduler_args(iteration)
                 param_group['lr'] = lr
+            if param_group['name'] == "coord_encoder":
+                lr = self.coord_encoder_scheduler_args(iteration)
+                param_group['lr'] = lr
+            if param_group['name'] == "feature_encoder":
+                lr = self.feature_encoder_scheduler_args(iteration)
+                param_group['lr'] = lr
+            if param_group['name'] == "joint_processor":
+                lr = self.joint_processor_scheduler_args(iteration)
+                param_group['lr'] = lr
+            if param_group['name'] == "self_attn":
+                lr = self.self_attn_scheduler_args(iteration)
+                param_group['lr'] = lr
+            if param_group['name'] == "output_net":
+                lr = self.output_net_scheduler_args(iteration)
+                param_group['lr'] = lr
+                
+                
 
     def construct_list_of_attributes(self):
         l = ['x', 'y', 'z', 'nx', 'ny', 'nz']
@@ -724,7 +847,7 @@ class GaussianModel(nn.Module):
     def cat_tensors_to_optimizer(self, tensors_dict):
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
-            if 'mlp' in group['name'] or 'conv' in group['name'] or 'feat_base' in group['name'] or 'encoding' in group['name']:
+            if 'mlp' in group['name'] or 'conv' in group['name'] or 'feat_base' in group['name'] or 'encoding' in group['name'] or 'encoder' in group['name'] or 'attn' in group['name'] or 'output_net' in group['name'] or 'joint_processor' in group['name']:
                 continue
             assert len(group["params"]) == 1
             extension_tensor = tensors_dict[group["name"]]
@@ -744,21 +867,24 @@ class GaussianModel(nn.Module):
 
         return optimizable_tensors
 
-    def training_statis(self, viewspace_point_tensor, opacity, update_filter, offset_selection_mask, anchor_visible_mask):
+    def training_statis(self, viewspace_point_tensor, opacity, update_filter, offset_selection_mask, anchor_visible_mask, xyz_len_list, active_gaussians):
         temp_opacity = opacity.clone().view(-1).detach()
         temp_opacity[temp_opacity<0] = 0
         temp_opacity = temp_opacity.view([-1, self.n_offsets])
 
         self.opacity_accum[anchor_visible_mask] += temp_opacity.sum(dim=1, keepdim=True)
         self.anchor_demon[anchor_visible_mask] += 1
+        
+        active_index_begin = sum(xyz_len_list[:active_gaussians])
+        active_index_end = sum(xyz_len_list[:active_gaussians+1]) + 1
 
         anchor_visible_mask = anchor_visible_mask.unsqueeze(dim=1).repeat([1, self.n_offsets]).view(-1)
         combined_mask = torch.zeros_like(self.offset_gradient_accum, dtype=torch.bool).squeeze(dim=1)
         combined_mask[anchor_visible_mask] = offset_selection_mask
         temp_mask = combined_mask.clone()
-        combined_mask[temp_mask] = update_filter
-
-        grad_norm = torch.norm(viewspace_point_tensor.grad[update_filter, :2], dim=-1, keepdim=True)
+        combined_mask[temp_mask] = update_filter[active_index_begin:active_index_end]
+        
+        grad_norm = torch.norm(viewspace_point_tensor.grad[active_index_begin:active_index_end][update_filter[active_index_begin:active_index_end], :2], dim=-1, keepdim=True)
 
         self.offset_gradient_accum[combined_mask] += grad_norm
         self.offset_denom[combined_mask] += 1
@@ -766,7 +892,7 @@ class GaussianModel(nn.Module):
     def _prune_anchor_optimizer(self, mask):
         optimizable_tensors = {}
         for group in self.optimizer.param_groups:
-            if 'mlp' in group['name'] or 'conv' in group['name'] or 'feat_base' in group['name'] or 'encoding' in group['name']:
+            if 'mlp' in group['name'] or 'conv' in group['name'] or 'feat_base' in group['name'] or 'encoding' in group['name'] or 'encoder' in group['name'] or 'attn' in group['name'] or 'output_net' in group['name'] or 'joint_processor' in group['name']:
                 continue
 
             stored_state = self.optimizer.state.get(group['params'][0], None)
@@ -1087,6 +1213,98 @@ class GaussianModel(nn.Module):
         # record(['Final Bit Total'], round((bit_anchor + bit_feat + bit_scaling + bit_offsets + bit_hash + bit_masks + self.get_mlp_size()[0])/bit2MB_scale, 4))
 
         return log_info
+    
+    @torch.no_grad()
+    def hir_estimate_final_bits(self, base_pc_list):
+        
+        low_anchor = torch.zeros(0, 3, device=base_pc_list[0].get_anchor.device)
+        low_feat = torch.zeros(0, base_pc_list[0].feat_dim, device=base_pc_list[0].get_anchor.device)
+        low_grid_offsets = torch.zeros(0, base_pc_list[0].n_offsets, 3, device=base_pc_list[0].get_anchor.device)
+        low_grid_scaling = torch.zeros(0, 6, device=base_pc_list[0].get_anchor.device)
+        low_binary_grid_masks = torch.zeros(0, base_pc_list[0].n_offsets, 1, device=base_pc_list[0].get_anchor.device)
+        low_mask_anchor = torch.zeros(0, device=base_pc_list[0].get_anchor.device)
+
+        for i in range(len(base_pc_list)):
+            low_pc = base_pc_list[i]
+            low_anchor = torch.cat([low_anchor, low_pc.get_anchor], dim=0)
+            low_feat = torch.cat([low_feat, low_pc._anchor_feat], dim=0)
+            low_grid_offsets = torch.cat([low_grid_offsets, low_pc._offset], dim=0)
+            low_grid_scaling = torch.cat([low_grid_scaling, low_pc.get_scaling], dim=0)
+            
+            low_binary_grid_masks = torch.cat([low_binary_grid_masks, low_pc.get_mask], dim=0)
+            low_mask_anchor = torch.cat([low_mask_anchor, low_pc.get_mask_anchor], dim=0)
+            
+        coord_max = low_anchor.max(dim=0)[0]
+        coord_min = low_anchor.min(dim=0)[0]
+
+        Q_feat = 1
+        Q_scaling = 0.001
+        Q_offsets = 0.2
+
+        mask_anchor = self.get_mask_anchor
+
+        _anchor = self.get_anchor[mask_anchor]
+        _feat = self._anchor_feat[mask_anchor]
+        _grid_offsets = self._offset[mask_anchor]
+        _scaling = self.get_scaling[mask_anchor]
+        _mask = self.get_mask[mask_anchor]
+        hash_embeddings = self.get_encoding_params()
+        
+        anchor_neighbor_index = self.get_anchor_neighbor_index()
+        n_feat, n_anchor, n_offsets, n_scaling = feat_collection(low_anchor, low_feat, low_grid_offsets, low_grid_scaling, anchor_neighbor_index)
+        n_offsets = torch.reshape(n_offsets, (-1, self.n_offsets, 3 * self.n_offsets))
+        feat_all = torch.cat([n_feat, n_offsets, n_scaling], dim=2)
+        hir_feat_context = self.hir_entropy_prediction(feat_all, n_anchor, coord_max, coord_min)
+        
+        mean, scale, mean_scaling, scale_scaling, mean_offsets, scale_offsets, Q_feat_adj, Q_scaling_adj, Q_offsets_adj = \
+            torch.split(hir_feat_context, split_size_or_sections=[self.feat_dim, self.feat_dim, 6, 6, 3*self.n_offsets, 3*self.n_offsets, 1, 1, 1], dim=-1)  # [N_visible_anchor, 32], [N_visible_anchor, 32]
+        Q_feat = Q_feat * (1 + torch.tanh(Q_feat_adj))
+        Q_scaling = Q_scaling * (1 + torch.tanh(Q_scaling_adj))
+        Q_offsets = Q_offsets * (1 + torch.tanh(Q_offsets_adj))
+        _feat = (STE_multistep.apply(_feat, Q_feat)).detach()
+        grid_scaling = (STE_multistep.apply(_scaling, Q_scaling)).detach()
+        offsets = (STE_multistep.apply(_grid_offsets, Q_offsets.unsqueeze(1))).detach()
+        offsets = offsets.view(-1, 3*self.n_offsets)
+        mask_tmp = _mask.repeat(1, 1, 3).view(-1, 3*self.n_offsets)
+
+        bit_feat = entropy_skipping(_feat, mean, scale, Q_feat)
+        bit_scaling = self.entropy_gaussian.forward(grid_scaling, mean_scaling, scale_scaling, Q_scaling)
+        bit_offsets = self.entropy_gaussian.forward(offsets, mean_offsets, scale_offsets, Q_offsets)
+        bit_offsets = bit_offsets * mask_tmp
+
+        bit_anchor = _anchor.shape[0]*3*anchor_round_digits
+        bit_feat = torch.sum(bit_feat).item()
+        bit_scaling = torch.sum(bit_scaling).item()
+        bit_offsets = torch.sum(bit_offsets).item()
+        if self.ste_binary:
+            bit_hash = get_binary_vxl_size((hash_embeddings+1)/2)[1].item()
+        else:
+            bit_hash = hash_embeddings.numel()*32
+        bit_masks = get_binary_vxl_size(_mask)[1].item()
+
+        print(bit_anchor, bit_feat, bit_scaling, bit_offsets, bit_hash, bit_masks)
+
+        log_info = f"\nEstimated sizes in MB: " \
+                   f"anchor {round(bit_anchor/bit2MB_scale, 4)}, " \
+                   f"feat {round(bit_feat/bit2MB_scale, 4)}, " \
+                   f"scaling {round(bit_scaling/bit2MB_scale, 4)}, " \
+                   f"offsets {round(bit_offsets/bit2MB_scale, 4)}, " \
+                   f"hash {round(bit_hash/bit2MB_scale, 4)}, " \
+                   f"masks {round(bit_masks/bit2MB_scale, 4)}, " \
+                   f"MLPs {round(self.get_mlp_size()[0]/bit2MB_scale, 4)}, " \
+                   f"Total {round((bit_anchor + bit_feat + bit_scaling + bit_offsets + bit_hash + bit_masks + self.get_mlp_size()[0])/bit2MB_scale, 4)}"
+                   
+        # record(['Final Bit Anchor'], round(bit_anchor/bit2MB_scale, 4))
+        # record(['Final Bit Feat'], round(bit_feat/bit2MB_scale, 4))
+        # record(['Final Bit Scaling'], round(bit_scaling/bit2MB_scale, 4))
+        # record(['Final Bit Offsets'], round(bit_offsets/bit2MB_scale, 4))
+        # record(['Final Bit Hash'], round(bit_hash/bit2MB_scale, 4))
+        # record(['Final Bit Masks'], round(bit_masks/bit2MB_scale, 4))
+        # record(['Final Bit MLPs'], round(self.get_mlp_size()[0]/bit2MB_scale, 4))
+        # record(['Final Bit Total'], round((bit_anchor + bit_feat + bit_scaling + bit_offsets + bit_hash + bit_masks + self.get_mlp_size()[0])/bit2MB_scale, 4))
+
+        return log_info
+
 
     @torch.no_grad()
     def conduct_encoding(self, pre_path_name):
@@ -1365,11 +1583,149 @@ class GaussianModel(nn.Module):
         return log_info
 
     def set_steps(self, args):
+        self.step_begin_anchor_spawn = args.step_begin_anchor_spawn
         self.step_begin_quantization = args.step_begin_quantization
-        self.step_begin_RD_training = args.step_begin_RD_training
+        self.step_pause_anchor_spawn = args.step_pause_anchor_spawn
+        self.step_resume_anchor_spawn = args.step_resume_anchor_spawn
+        self.step_end_anchor_spawn = args.step_end_anchor_spawn
+        self.step_full_RD = args.step_full_RD
+        self.step_end_train = args.step_end_train
         
     def save_min_max(self, pre_path_name):
         torch.save([self.x_bound_min, self.x_bound_max], os.path.join(pre_path_name, 'min_max.pkl'))
         
     def load_min_max(self, pre_path_name):
         self.x_bound_min, self.x_bound_max = torch.load(os.path.join(pre_path_name, 'min_max.pkl'))
+        
+    def hir_entropy_prediction(self, features, coords, coord_max, coord_min):
+        """
+        输入:
+            features: (M, 10, input_feat_dim)
+            coords: (M, 10, 3) 邻近点坐标
+        输出:
+            (M,  input_feat_dim*2 + 3)
+        """
+
+        coords = (coords - coord_min) / (coord_max - coord_min)
+        coords = torch.reshape(coords, (-1, 3))
+        coord_feat = self.encoding_xyz(coords)
+        coord_feat = torch.reshape(coord_feat, (features.shape[0], self.n_offsets, -1))
+        coord_feat_2 = self.coord_encoder(coord_feat)
+        feature_feat = self.feature_encoder(features)
+        
+        combined = torch.cat([coord_feat_2, feature_feat], dim=-1)
+        point_feat = self.joint_processor(combined)
+        
+        point_feat = point_feat.permute(1, 0, 2)
+        attn_feat, _ = self.self_attn(point_feat, point_feat, point_feat)
+        attn_feat = attn_feat.permute(1, 0, 2)
+        
+        global_feat = attn_feat.max(dim=1)[0]
+        
+        return self.output_net(global_feat)
+    
+    def build_anchor_neighbor_index_cache(self, anchor, K=10, batch_size=4096):
+        """
+        anchor: (N, 3) 源点云
+        K: 最近邻点数
+        batch_size: 每批次处理的目标点数（根据显存调整）
+        
+        输出：
+            None
+        保存：
+            neighbor_indices: (M, K) 每个目标点的最近邻索引
+        """
+        print("Building anchor neighbor index cache...")
+        anchor_1 = anchor.detach().cpu()
+        anchor_2 = self.get_anchor.detach().cpu()
+        M = anchor_2.shape[0]
+        neighbor_indices = []
+        
+        torch.cuda.empty_cache()
+        
+        for i in range(0, M, batch_size):
+            print(f"Processing batch {i}... len={M}")
+            end_idx = min(i + batch_size, M)
+            current_batch = anchor_2[i:end_idx]
+            
+            dist = torch.cdist(anchor_1, current_batch, p=2)
+            
+            indices = torch.topk(dist, K, dim=0, largest=False)[1].T
+            neighbor_indices.append(indices)
+        
+        neighbor_indices = torch.cat(neighbor_indices, dim=0)
+        self.anchor_neighbor_index_cache = neighbor_indices.to(self.get_anchor.device)
+
+    def get_anchor_neighbor_index(self):
+        return self.anchor_neighbor_index_cache
+    
+    def hir_division(self, base_gaussian):
+        old_anchor = self._anchor
+        old_scaling = self._scaling
+        old_rotation = self._rotation
+        old_anchor_feat = self._anchor_feat
+        old_offset = self._offset
+        old_mask = self._mask
+        old_opacity = self._opacity
+        
+        remain_ratio = 1 - self.hir_division_ratio
+        r_mask = torch.rand(self.get_anchor.shape[0]) < remain_ratio
+        n_mask = ~r_mask
+        remain_anchor = old_anchor[r_mask]
+        remain_scaling = old_scaling[r_mask]
+        remain_rotation = old_rotation[r_mask]
+        remain_anchor_feat = old_anchor_feat[r_mask]
+        remain_offset = old_offset[r_mask]
+        remain_mask = old_mask[r_mask]
+        remain_opacity = old_opacity[r_mask]
+        d = {
+            "anchor": remain_anchor,
+            "scaling": remain_scaling,
+            "rotation": remain_rotation,
+            "anchor_feat": remain_anchor_feat,
+            "offset": remain_offset,
+            "mask": remain_mask,
+            "opacity": remain_opacity,
+        }
+
+        optimizable_tensors = self.cat_tensors_to_optimizer(d)
+        self._anchor = optimizable_tensors["anchor"]
+        self._scaling = optimizable_tensors["scaling"]
+        self._rotation = optimizable_tensors["rotation"]
+        self._anchor_feat = optimizable_tensors["anchor_feat"]
+        self._offset = optimizable_tensors["offset"]
+        self._mask = optimizable_tensors["mask"]
+        self._opacity = optimizable_tensors["opacity"]
+        
+        new_anchor = old_anchor[n_mask]
+        new_scaling = old_scaling[n_mask]
+        new_rotation = old_rotation[n_mask]
+        new_anchor_feat = old_anchor_feat[n_mask]
+        new_offset = old_offset[n_mask]
+        new_mask = old_mask[n_mask]
+        new_opacity = old_opacity[n_mask]
+        
+        base_gaussian._anchor = nn.Parameter(new_anchor.requires_grad_(True))
+        base_gaussian._offset = nn.Parameter(new_offset.requires_grad_(True))
+        base_gaussian._mask = nn.Parameter(new_mask.requires_grad_(True))
+        base_gaussian._anchor_feat = nn.Parameter(new_anchor_feat.requires_grad_(True))
+        base_gaussian._scaling = nn.Parameter(new_scaling.requires_grad_(True))
+        base_gaussian._rotation = nn.Parameter(new_rotation.requires_grad_(True))
+        base_gaussian._opacity = nn.Parameter(new_opacity.requires_grad_(True))
+        base_gaussian.max_radii2D = torch.zeros((base_gaussian._anchor.shape[0]), device="cuda")
+        
+        base_gaussian.mlp_opacity.load_state_dict(self.mlp_opacity.state_dict())
+        base_gaussian.mlp_cov.load_state_dict(self.mlp_cov.state_dict())
+        base_gaussian.mlp_color.load_state_dict(self.mlp_color.state_dict())
+        base_gaussian.encoding_xyz.load_state_dict(self.encoding_xyz.state_dict())
+        base_gaussian.mlp_grid.load_state_dict(self.mlp_grid.state_dict())
+        base_gaussian.mlp_mask.load_state_dict(self.mlp_mask.state_dict())
+        base_gaussian.mlp_deform.load_state_dict(self.mlp_deform.state_dict())
+        base_gaussian.coord_encoder.load_state_dict(self.coord_encoder.state_dict())
+        base_gaussian.feature_encoder.load_state_dict(self.feature_encoder.state_dict())
+        base_gaussian.joint_processor.load_state_dict(self.joint_processor.state_dict())
+        base_gaussian.output_net.load_state_dict(self.output_net.state_dict())
+        base_gaussian.self_attn.load_state_dict(self.self_attn.state_dict())
+        
+        
+        
