@@ -80,21 +80,21 @@ class PipelineParams(ParamGroup):
 
 class OptimizationParams(ParamGroup):
     def __init__(self, parser):
-        self.iterations = 15000
+        self.iterations = 30000
         self.position_lr_init = 0.0
         self.position_lr_final = 0.0
         self.position_lr_delay_mult = 0.01
-        self.position_lr_max_steps = 15000
+        self.position_lr_max_steps = 30000
         
         self.offset_lr_init = 0.01
         self.offset_lr_final = 0.0001
         self.offset_lr_delay_mult = 0.01
-        self.offset_lr_max_steps = 15000
+        self.offset_lr_max_steps = 30000
         
         self.mask_lr_init = 0.01
         self.mask_lr_final = 0.0001
         self.mask_lr_delay_mult = 0.01
-        self.mask_lr_max_steps = 15000
+        self.mask_lr_max_steps = 30000
 
         self.feature_lr = 0.0075
         self.opacity_lr = 0.02
@@ -104,62 +104,62 @@ class OptimizationParams(ParamGroup):
         self.mlp_opacity_lr_init = 0.002
         self.mlp_opacity_lr_final = 0.00002  
         self.mlp_opacity_lr_delay_mult = 0.01
-        self.mlp_opacity_lr_max_steps = 15000
+        self.mlp_opacity_lr_max_steps = 30000
 
         self.mlp_cov_lr_init = 0.004
         self.mlp_cov_lr_final = 0.004
         self.mlp_cov_lr_delay_mult = 0.01
-        self.mlp_cov_lr_max_steps = 15000
+        self.mlp_cov_lr_max_steps = 30000
         
         self.mlp_color_lr_init = 0.008
         self.mlp_color_lr_final = 0.00005
         self.mlp_color_lr_delay_mult = 0.01
-        self.mlp_color_lr_max_steps = 15000
+        self.mlp_color_lr_max_steps = 30000
         
         self.mlp_featurebank_lr_init = 0.01
         self.mlp_featurebank_lr_final = 0.00001
         self.mlp_featurebank_lr_delay_mult = 0.01
-        self.mlp_featurebank_lr_max_steps = 15000
+        self.mlp_featurebank_lr_max_steps = 30000
 
         self.encoding_xyz_lr_init = 0.005
         self.encoding_xyz_lr_final = 0.00001
         self.encoding_xyz_lr_delay_mult = 0.33
-        self.encoding_xyz_lr_max_steps = 15000
+        self.encoding_xyz_lr_max_steps = 30000
 
         self.mlp_grid_lr_init = 0.005
         self.mlp_grid_lr_final = 0.00001
         self.mlp_grid_lr_delay_mult = 0.01
-        self.mlp_grid_lr_max_steps = 15000
+        self.mlp_grid_lr_max_steps = 30000
 
         self.mlp_deform_lr_init = 0.005
         self.mlp_deform_lr_final = 0.0005
         self.mlp_deform_lr_delay_mult = 0.01
-        self.mlp_deform_lr_max_steps = 15000
+        self.mlp_deform_lr_max_steps = 30000
         
         self.coord_encoder_lr_init = 0.005
         self.coord_encoder_lr_final = 0.0005
         self.coord_encoder_lr_delay_mult = 0.01
-        self.coord_encoder_lr_max_steps = 15000
+        self.coord_encoder_lr_max_steps = 30000
         
         self.feature_encoder_lr_init = 0.005
         self.feature_encoder_lr_final = 0.0005
         self.feature_encoder_lr_delay_mult = 0.01
-        self.feature_encoder_lr_max_steps = 15000
+        self.feature_encoder_lr_max_steps = 30000
         
         self.joint_processor_lr_init = 0.005
         self.joint_processor_lr_final = 0.0005
         self.joint_processor_lr_delay_mult = 0.01
-        self.joint_processor_lr_max_steps = 15000
+        self.joint_processor_lr_max_steps = 30000
         
         self.self_attn_lr_init = 0.005
         self.self_attn_lr_final = 0.0005
         self.self_attn_lr_delay_mult = 0.01
-        self.self_attn_lr_max_steps = 15000
+        self.self_attn_lr_max_steps = 30000
         
         self.output_net_lr_init = 0.005
         self.output_net_lr_final = 0.0005
         self.output_net_lr_delay_mult = 0.01
-        self.output_net_lr_max_steps = 15000
+        self.output_net_lr_max_steps = 30000
         
 
         self.percent_dense = 0.01
@@ -169,7 +169,7 @@ class OptimizationParams(ParamGroup):
         self.start_stat = 500
         self.update_from = 1500
         self.update_interval = 100
-        self.update_until = 15_000
+        self.update_until = 30000
         
         self.min_opacity = 0.005  # 0.2
         self.success_threshold = 0.8

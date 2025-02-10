@@ -39,6 +39,8 @@ from custom.model import entropy_skipping
 from custom.recorder import record, init_recorder, get_logger, init_tb_writer, tb_writer, tb
 import pickle
 from torch.utils.tensorboard import SummaryWriter
+from torchinfo import summary
+import torch
 
 bit2MB_scale = 8 * 1024 * 1024
 HIERACHICAL_LAYERS = 2
@@ -62,106 +64,122 @@ def training(args_param, dataset, opt, pipe, testing_iterations, saving_iteratio
         ))                   
     scene = Scene(dataset, gaussian_list, ply_path=ply_path)
     active_gaussians = 0
-    active_gaussians_iter = 0
 
     iter_start = torch.cuda.Event(enable_timing = True)
     iter_end = torch.cuda.Event(enable_timing = True)
 
     viewpoint_stack = None
     ema_loss_for_log = 0.0
-    progress_bar = tqdm(range(first_iter, args_param.step_end_train * HIERACHICAL_LAYERS), desc="Training progress")
+    progress_bar = tqdm(range(first_iter, args_param.iterations), desc="Training progress")
     first_iter += 1
     torch.cuda.synchronize(); t_start = time.time()
     log_time_sub = 0
-    for active_i in range(HIERACHICAL_LAYERS):
-        if active_i != 0:
-            gaussian_list[active_i-1].hir_division(gaussian_list[active_i])
-        gaussian_list[active_i].update_anchor_bound()
-        gaussian_list[active_i].set_steps(args_param)
-        gaussian_list[active_i].training_setup(opt)
-        for i in range(HIERACHICAL_LAYERS):
-            gaussian_list[i].eval()
-        gaussian_list[active_i].train()
-        for iteration in range(0, args_param.step_end_train + 1):
-            active_gaussians = active_i
-            gaussians = gaussian_list[active_i]
-            iter_start.record()
+    
+    
+    gaussian_list[0].update_anchor_bound()
+    gaussian_list[0].set_steps(args_param)
+    gaussian_list[0].training_setup(opt)
+    for i in range(HIERACHICAL_LAYERS):
+        gaussian_list[i].eval()
+    gaussian_list[0].train()
+    
+    gaussians = gaussian_list[0]
+    for iteration in range(0, args_param.iterations + 1):
+        
+        iter_start.record()
 
-            gaussians.update_learning_rate(active_gaussians_iter)
+        gaussians.update_learning_rate(iteration)
 
-            bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
-            background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
+        bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
+        background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
 
-            # Pick a random Camera
-            if not viewpoint_stack:
-                viewpoint_stack = scene.getTrainCameras().copy()
-            viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
+        # Pick a random Camera
+        if not viewpoint_stack:
+            viewpoint_stack = scene.getTrainCameras().copy()
+        viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
 
-            voxel_visible_mask_list = prefilter_voxel(viewpoint_cam, gaussian_list, pipe, background, active_gaussians=active_gaussians)
-            retain_grad = (iteration < args_param.step_end_anchor_spawn and iteration >= 0)
-            render_pkg = render(viewpoint_cam, gaussian_list, pipe, background, visible_mask_list=voxel_visible_mask_list, retain_grad=retain_grad, step=iteration, active_gaussians=active_gaussians, is_training=True)
-            image, viewspace_point_tensor, xyz_len_list, visibility_filter, offset_selection_mask, radii, scaling, opacity = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["xyz_len_list"], render_pkg["visibility_filter"], render_pkg["selection_mask"], render_pkg["radii"], render_pkg["scaling"], render_pkg["neural_opacity"]
+        voxel_visible_mask_list = prefilter_voxel(viewpoint_cam, gaussian_list, pipe, background, active_gaussians=active_gaussians)
+        retain_grad = (iteration < args_param.step_end_anchor_spawn and iteration >= 0)
+        render_pkg = render(viewpoint_cam, gaussian_list, pipe, background, visible_mask_list=voxel_visible_mask_list, retain_grad=retain_grad, step=iteration, active_gaussians=active_gaussians, is_training=True)
+        image, viewspace_point_tensor, xyz_len_list, visibility_filter, offset_selection_mask, radii, scaling, opacity = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["xyz_len_list"], render_pkg["visibility_filter"], render_pkg["selection_mask"], render_pkg["radii"], render_pkg["scaling"], render_pkg["neural_opacity"]
 
-            bit_per_param = render_pkg["bit_per_param"]
-            gt_image = viewpoint_cam.original_image.cuda()
-            Ll1 = l1_loss(image, gt_image)
+        bit_per_param = render_pkg["bit_per_param"]
+        gt_image = viewpoint_cam.original_image.cuda()
+        Ll1 = l1_loss(image, gt_image)
 
-            ssim_loss = (1.0 - ssim(image, gt_image))
-            scaling_reg = scaling.prod(dim=1).mean()
-            loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * ssim_loss + 0.01*scaling_reg
-            tb().add_scalar("train/loss/fidelity_loss", loss.item(), active_i * args_param.step_end_train + iteration)
+        ssim_loss = (1.0 - ssim(image, gt_image))
+        scaling_reg = scaling.prod(dim=1).mean()
+        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * ssim_loss + 0.01*scaling_reg
+        tb().add_scalar("train/loss/fidelity_loss", loss.item(), iteration)
 
-            if bit_per_param is not None:
-                _, bit_hash_grid, MB_hash_grid, _ = get_binary_vxl_size((gaussians.get_encoding_params()+1)/2)
-                denom = gaussians._anchor.shape[0]*(gaussians.feat_dim+6+3*gaussians.n_offsets)
-                bit_loss = args_param.lmbda * (bit_per_param + bit_hash_grid / denom)
-                loss = loss + bit_loss
-                tb().add_scalar("train/loss/bit_loss", bit_loss.item(), active_i * args_param.step_end_train + iteration)
+        if bit_per_param is not None:
+            _, bit_hash_grid, MB_hash_grid, _ = get_binary_vxl_size((gaussians.get_encoding_params()+1)/2)
+            denom = gaussians._anchor.shape[0]*(gaussians.feat_dim+6+3*gaussians.n_offsets)
+            bit_loss = args_param.lmbda * (bit_per_param + bit_hash_grid / denom)
+            if iteration > args_param.step_end_train:
+                bit_loss = bit_loss * args_param.k
+            loss = loss + bit_loss
+            tb().add_scalar("train/loss/bit_loss", bit_loss.item(),  iteration)
 
-                mask_loss = 5e-4 * torch.mean(torch.sigmoid(gaussians._mask))
-                loss = loss + mask_loss
-                tb().add_scalar("train/loss/mask_loss", mask_loss.item(), active_i * args_param.step_end_train + iteration)
-                tb().add_scalar("train/loss/loss", bit_per_param, active_i * args_param.step_end_train + iteration)
+            mask_loss = 5e-4 * torch.mean(torch.sigmoid(gaussians._mask))
+            loss = loss + mask_loss
+            tb().add_scalar("train/loss/mask_loss", mask_loss.item(), iteration)
+            tb().add_scalar("train/loss/loss", bit_per_param, iteration)
+            
+
+        loss.backward()
+
+        iter_end.record()
+
+        with torch.no_grad():
+            # Progress bar
+            ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
+
+            if iteration % 10 == 0:
+                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}"})
+                progress_bar.update(10)
+            if iteration == opt.iterations:
+                progress_bar.close()
+
+            # densification
+            if iteration < args_param.step_end_anchor_spawn and iteration > args_param.step_begin_anchor_spawn:
+                gaussians.training_statis(viewspace_point_tensor, opacity, visibility_filter, offset_selection_mask, voxel_visible_mask_list[active_gaussians], xyz_len_list, active_gaussians)
+                if iteration not in range(args_param.step_pause_anchor_spawn, args_param.step_resume_anchor_spawn):  # let the model get fit to quantization
+                    # densification
+                    if iteration > args_param.step_begin_anchor_spawn and iteration % opt.update_interval == 0:
+                        gaussians.adjust_anchor(check_interval=opt.update_interval, success_threshold=opt.success_threshold, grad_threshold=opt.densify_grad_threshold, min_opacity=opt.min_opacity)
+            elif iteration == args_param.step_end_anchor_spawn:
+                del gaussians.opacity_accum
+                del gaussians.offset_gradient_accum
+                del gaussians.offset_denom
+                torch.cuda.empty_cache()
+
+            if iteration < args_param.iterations:
+                gaussians.optimizer.step()
+                gaussians.optimizer.zero_grad(set_to_none = True)
                 
+            if iteration == args_param.step_end_train:
+                gaussians.eval()
+                gaussian_list[active_gaussians].hir_division(gaussian_list[active_gaussians + 1])
+                active_gaussians += 1
+                
+                gaussians = gaussian_list[active_gaussians]
+                gaussians.update_anchor_bound()
+                gaussians.set_steps(args_param)
+                gaussians.training_setup(opt)
+                gaussians.train()
+                
+                print("Active Gaussians Switched: ", active_gaussians)
 
-            loss.backward()
-
-            iter_end.record()
-
-            with torch.no_grad():
-                # Progress bar
-                ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
-
-                if iteration % 10 == 0:
-                    progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}"})
-                    progress_bar.update(10)
-                if iteration == opt.iterations:
-                    progress_bar.close()
-
-                # densification
-                if iteration < args_param.step_end_anchor_spawn and iteration > args_param.step_begin_anchor_spawn:
-                    gaussians.training_statis(viewspace_point_tensor, opacity, visibility_filter, offset_selection_mask, voxel_visible_mask_list[active_gaussians], xyz_len_list, active_gaussians)
-                    if iteration not in range(args_param.step_pause_anchor_spawn, args_param.step_resume_anchor_spawn):  # let the model get fit to quantization
-                        # densification
-                        if iteration > args_param.step_begin_anchor_spawn and iteration % opt.update_interval == 0:
-                            gaussians.adjust_anchor(check_interval=opt.update_interval, success_threshold=opt.success_threshold, grad_threshold=opt.densify_grad_threshold, min_opacity=opt.min_opacity)
-                elif iteration == args_param.step_end_anchor_spawn:
-                    del gaussians.opacity_accum
-                    del gaussians.offset_gradient_accum
-                    del gaussians.offset_denom
-                    torch.cuda.empty_cache()
-
-                if iteration < args_param.step_end_train:
-                    gaussians.optimizer.step()
-                    gaussians.optimizer.zero_grad(set_to_none = True)
-                    
-                tb().add_scalar("train/model/anchor_size", gaussians._anchor.shape[0], active_i * args_param.step_end_train + iteration)
-                print(gaussians._anchor.shape[0])
+                
+            tb().add_scalar("train/model/anchor_size", gaussians._anchor.shape[0], active_gaussians * args_param.step_end_train + iteration)
            
     # Log and save
     torch.cuda.synchronize(); t_start_log = time.time()
-    # apply_coding(gaussian_list, logger, args_param.model_path)
-    # apply_testing(scene, (pipe, background), logger)
+    apply_coding(gaussian_list, logger, args_param.model_path)
+    print('apply coding done')
+    apply_testing(scene, (pipe, background), logger)
+    print('apply testing done')
     logger.info("\n[ITER {}] Saving Gaussians".format(iteration * HIERACHICAL_LAYERS))
     scene.save(iteration)
     torch.cuda.synchronize(); t_end_log = time.time()
@@ -225,6 +243,8 @@ def apply_testing(scene : Scene, renderArgs, logger=None):
                 psnr_test += psnr(image, gt_image).mean().double()
                 ssim_test += ssim(image, gt_image).mean().double()
                 lpips_test += lpips(image, gt_image, net_type='vgg').detach().mean().double()
+                
+                torch.cuda.empty_cache()
 
             psnr_test /= len(config['cameras'])
             ssim_test /= len(config['cameras'])
@@ -294,14 +314,16 @@ def main():
     parser.add_argument("--log2_2D", type=int, default = 15)
     parser.add_argument("--n_features", type=int, default = 4)
     parser.add_argument("--lmbda", type=float, default = 0.001)
+    parser.add_argument("--k", type=float, default = 4)
     
     parser.add_argument("--step_begin_anchor_spawn", type=int, default=1600)
     parser.add_argument("--step_begin_quantization", type=int, default=3000)
     parser.add_argument("--step_pause_anchor_spawn", type=int, default=3000)
     parser.add_argument("--step_resume_anchor_spawn", type=int, default=4000)
-    parser.add_argument("--step_end_anchor_spawn", type=int, default=5000)
-    parser.add_argument("--step_full_RD", type=int, default=5000)
-    parser.add_argument("--step_end_train", type=int, default=15000)
+    parser.add_argument("--step_end_anchor_spawn", type=int, default=10000)
+    parser.add_argument("--step_full_RD", type=int, default=10000)
+    parser.add_argument("--step_end_train", type=int, default=20000)
+
     # adjust the following op parameters to control densification
     # start_stat = 500
     # update_from = 1500

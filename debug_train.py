@@ -1,4 +1,5 @@
 lmbda_list = [0.004]
+k = 4
 scene_list = ['amsterdam']
 dataset_path = '/home/ethan/Project/Python/HAC/data/bungeenerf'
 
@@ -31,7 +32,8 @@ def run_train():
                 "--voxel_size", "0",
                 "--update_init_factor", "128",
                 "-m", f"outputs/{os.path.basename(dataset_path)}/{scene}/{lmbda}_ESGS",
-                "--lmbda", str(lmbda)
+                "--lmbda", str(lmbda),
+                "--k", str(k)
             ]
             if enable_debug:
                 sys.argv += [

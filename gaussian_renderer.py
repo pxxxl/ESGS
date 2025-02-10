@@ -90,11 +90,29 @@ def generate_neural_gaussians_hirachical(viewpoint_camera, pc_list : GaussianMod
 
         if step > pc.step_full_RD:
             anchor_neighbor_index = pc.get_anchor_neighbor_index()
-            neighbor_indices = anchor_neighbor_index[visible_mask]
-            n_feat, n_anchor, n_offsets, n_scaling = feat_collection(low_anchor, low_feat, low_grid_offsets, low_grid_scaling, neighbor_indices)
+            if anchor_neighbor_index is None:
+                pc.update_anchor_bound()
+                pc.build_anchor_neighbor_index_cache(low_anchor)
+                anchor_neighbor_index = pc.get_anchor_neighbor_index()
+            neighbor_indices = anchor_neighbor_index[visible_mask].to(pc.get_anchor.device)
+            n_feat = low_feat[neighbor_indices]
+            n_anchor = low_anchor[neighbor_indices]
+            n_offsets = low_grid_offsets[neighbor_indices]
+            n_scaling = low_grid_scaling[neighbor_indices]
             n_offsets = torch.reshape(n_offsets, (-1, pc_list[0].n_offsets, 3 * pc_list[0].n_offsets))
             feat_all = torch.cat([n_feat, n_offsets, n_scaling], dim=2)
-            hir_feat_context = pc.hir_entropy_prediction(feat_all, n_anchor, coord_max, coord_min)
+            
+            # hir_feat_context = pc.hir_entropy_prediction(feat_all, n_anchor, coord_max, coord_min)
+            batch_size = 65536
+            num_samples = feat_all.size(0)
+            hir_feat_context_part = []
+            for i in range(0, num_samples, batch_size):
+                batch_feat = feat_all[i:i + batch_size]
+                batch_n_anchor = n_anchor[i:i + batch_size]
+                batch_result = pc.hir_entropy_prediction(batch_feat, batch_n_anchor, coord_max, coord_min)
+                hir_feat_context_part.append(batch_result)
+            hir_feat_context = torch.cat(hir_feat_context_part, dim=0)
+            
             
             mean, scale, mean_scaling, scale_scaling, mean_offsets, scale_offsets, Q_feat_adj, Q_scaling_adj, Q_offsets_adj = \
                 torch.split(hir_feat_context, split_size_or_sections=[pc.feat_dim, pc.feat_dim, 6, 6, 3*pc.n_offsets, 3*pc.n_offsets, 1, 1, 1], dim=-1)
@@ -148,7 +166,7 @@ def generate_neural_gaussians_hirachical(viewpoint_camera, pc_list : GaussianMod
     elif not pc.decoded_version:
         torch.cuda.synchronize(); t1 = time.time()
         anchor_neighbor_index = pc.get_anchor_neighbor_index()
-        neighbor_indices = anchor_neighbor_index[visible_mask]
+        neighbor_indices = anchor_neighbor_index[visible_mask].to(pc.get_anchor.device)
         n_feat, n_anchor, n_offsets, n_scaling = feat_collection(low_anchor, low_feat, low_grid_offsets, low_grid_scaling, neighbor_indices)
         n_offsets = torch.reshape(n_offsets, (-1, pc_list[0].n_offsets, 3 * pc_list[0].n_offsets))
         feat_all = torch.cat([n_feat, n_offsets, n_scaling], dim=2)

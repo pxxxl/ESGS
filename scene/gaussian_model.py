@@ -1251,7 +1251,8 @@ class GaussianModel(nn.Module):
         hash_embeddings = self.get_encoding_params()
         
         anchor_neighbor_index = self.get_anchor_neighbor_index()
-        n_feat, n_anchor, n_offsets, n_scaling = feat_collection(low_anchor, low_feat, low_grid_offsets, low_grid_scaling, anchor_neighbor_index)
+        neighbor_indices = anchor_neighbor_index[mask_anchor].to(self.get_anchor.device)
+        n_feat, n_anchor, n_offsets, n_scaling = feat_collection(low_anchor, low_feat, low_grid_offsets, low_grid_scaling, neighbor_indices)
         n_offsets = torch.reshape(n_offsets, (-1, self.n_offsets, 3 * self.n_offsets))
         feat_all = torch.cat([n_feat, n_offsets, n_scaling], dim=2)
         hir_feat_context = self.hir_entropy_prediction(feat_all, n_anchor, coord_max, coord_min)
@@ -1636,8 +1637,8 @@ class GaussianModel(nn.Module):
             neighbor_indices: (M, K) 每个目标点的最近邻索引
         """
         print("Building anchor neighbor index cache...")
-        anchor_1 = anchor.detach().cpu()
-        anchor_2 = self.get_anchor.detach().cpu()
+        anchor_1 = anchor
+        anchor_2 = self.get_anchor
         M = anchor_2.shape[0]
         neighbor_indices = []
         
@@ -1654,10 +1655,11 @@ class GaussianModel(nn.Module):
             neighbor_indices.append(indices)
         
         neighbor_indices = torch.cat(neighbor_indices, dim=0)
-        self.anchor_neighbor_index_cache = neighbor_indices.to(self.get_anchor.device)
+        self.anchor_neighbor_index_cache = neighbor_indices
 
     def get_anchor_neighbor_index(self):
         return self.anchor_neighbor_index_cache
+    
     
     def hir_division(self, base_gaussian):
         old_anchor = self._anchor
@@ -1727,5 +1729,17 @@ class GaussianModel(nn.Module):
         base_gaussian.output_net.load_state_dict(self.output_net.state_dict())
         base_gaussian.self_attn.load_state_dict(self.self_attn.state_dict())
         
+    def mlp_to_cpu(self):
+        self.mlp_opacity = self.mlp_opacity.cpu()
+        self.mlp_cov = self.mlp_cov.cpu()
+        self.mlp_color = self.mlp_color.cpu()
+        self.mlp_grid = self.mlp_grid.cpu()
+        self.mlp_mask = self.mlp_mask.cpu()
+        self.mlp_deform = self.mlp_deform.cpu()
+        self.coord_encoder = self.coord_encoder.cpu()
+        self.feature_encoder = self.feature_encoder.cpu()
+        self.joint_processor = self.joint_processor.cpu()
+        self.output_net = self.output_net.cpu()
+        self.self_attn = self.self_attn.cpu()
         
         
